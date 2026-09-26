@@ -3,7 +3,8 @@
  * Wraps native fetch with auth headers and standard response parsing
  */
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
+const rawBaseUrl = (import.meta.env.VITE_API_BASE_URL || '/api').trim().replace(/\/+$/, '');
+const API_BASE_URL = rawBaseUrl.endsWith('/api') ? rawBaseUrl : `${rawBaseUrl}/api`;
 
 /**
  * Generic request helper
@@ -18,7 +19,8 @@ async function request(endpoint, options = {}) {
     ...options.headers,
   };
 
-  const url = endpoint.startsWith('http') ? endpoint : `${API_BASE_URL}${endpoint}`;
+  const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  const url = endpoint.startsWith('http') ? endpoint : `${API_BASE_URL}${cleanEndpoint}`;
 
   try {
     const response = await fetch(url, {
@@ -45,7 +47,7 @@ async function request(endpoint, options = {}) {
   } catch (error) {
     // Re-throw formatted error
     if (error.message === 'Failed to fetch') {
-      throw new Error('Unable to connect to the backend server. Please verify the server is running on port 5000.');
+      throw new Error('Unable to connect to the backend server. If using a free host like Render, it may be waking up from cold start (30-60s). Please try again shortly.');
     }
     throw error;
   }

@@ -16,8 +16,14 @@ const app = express();
 app.use(helmet());
 
 // Cross-Origin Resource Sharing
+const configuredOrigins = (process.env.CLIENT_URL || '')
+  .split(',')
+  .map((url) => url.trim().replace(/\/+$/, ''))
+  .filter(Boolean);
+
 const allowedOrigins = [
-  process.env.CLIENT_URL || 'http://localhost:5173',
+  ...configuredOrigins,
+  'http://localhost:5173',
   'http://localhost:3000',
   'http://127.0.0.1:5173',
 ];
