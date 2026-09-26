@@ -22,13 +22,20 @@ async function request(endpoint, options = {}) {
   const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
   const url = endpoint.startsWith('http') ? endpoint : `${API_BASE_URL}${cleanEndpoint}`;
 
+  console.info(`[AskCampusAi API] ${options.method || 'GET'} -> ${url}`);
+
   try {
     const response = await fetch(url, {
       ...options,
       headers,
     });
 
-    const data = await response.json();
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = { message: `Server returned HTTP ${response.status}` };
+    }
 
     if (!response.ok) {
       // If unauthorized, clean up stale token
@@ -47,7 +54,8 @@ async function request(endpoint, options = {}) {
   } catch (error) {
     // Re-throw formatted error
     if (error.message === 'Failed to fetch') {
-      throw new Error('Unable to connect to the backend server. If using a free host like Render, it may be waking up from cold start (30-60s). Please try again shortly.');
+      console.error(`[AskCampusAi API Error] Failed to fetch from: ${url}`, error);
+      throw new Error(`Unable to connect to backend server (${url}). If Render is waking up from sleep, wait 30-60s and try again.`);
     }
     throw error;
   }
