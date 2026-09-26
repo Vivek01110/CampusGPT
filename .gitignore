@@ -1,0 +1,61 @@
+# Dependencies
+node_modules/
+**/node_modules/
+/.pnp
+.pnp.js
+
+# Environment variables & secrets (CRITICAL for GitHub upload)
+.env
+.env.*
+**/.env
+**/.env.*
+!**/.env.example
+
+# File uploads and crawled documents
+backend/uploads/
+uploads/
+**/uploads/*
+!**/uploads/.gitkeep
+
+# Production builds
+dist/
+**/dist/
+build/
+**/build/
+
+# Logs
+*.log
+**/*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Test coverage & evaluation artifacts
+coverage/
+*.lcov
+.nyc_output/
+
+# Editor & IDE directories
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.sublime-project
+*.sublime-workspace
+
+# OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Phase documentation
+docs/phases/
+doc/phases/
+docs/
+doc/
+
