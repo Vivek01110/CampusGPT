@@ -131,6 +131,29 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
   console.log(`[QUERY ROUTER] Query: "${query.slice(0, 50)}..." -> Intent: ${classification.intent}, Strategy: ${classification.queryType}`);
 
   // --------------------------------------------------------------------------
+  // STRATEGY 0: General Conversational Chat & Greetings
+  // --------------------------------------------------------------------------
+  if (classification.queryType === 'chat' || classification.intent === INTENTS.GENERAL_CHAT) {
+    let chatAnswer = "Hello! I'm AskCampusAi, your official university campus assistant. How can I help you with courses, exams, campus regulations, or academic notices today?";
+    const lowerQuery = query.toLowerCase();
+    if (/thank/i.test(lowerQuery)) {
+      chatAnswer = "You're welcome! Feel free to ask if you have any questions about campus regulations, exam dates, or courses.";
+    } else if (/who are you|what can you do|what are you/i.test(lowerQuery)) {
+      chatAnswer = "I'm AskCampusAi, an AI assistant for university students. I can help you find verified information about academic ordinances, attendance rules, examination schedules, previous year question papers, hostel regulations, and official notices.";
+    }
+    return {
+      answer: chatAnswer,
+      queryType: 'chat',
+      intent: INTENTS.GENERAL_CHAT,
+      coverage: 'FULL',
+      sources: [],
+      structuredData: null,
+      clarification: null,
+      retrieval: { strategy: 'conversational_response', cached: false },
+    };
+  }
+
+  // --------------------------------------------------------------------------
   // STRATEGY 1: Clarification
   // --------------------------------------------------------------------------
   if (classification.queryType === 'clarification') {
@@ -322,20 +345,29 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
       })),
     ];
 
-    const answer = await generateAnswer(query, contextItems);
+    const genResult = await generateAnswer(query, contextItems);
+    const answer = (genResult && genResult.answer) ? genResult.answer : String(genResult);
+    const lowerAnswer = answer.toLowerCase();
+    const isAnswerNotFound =
+      lowerAnswer.includes("couldn't find") ||
+      lowerAnswer.includes("could not find") ||
+      lowerAnswer.includes("not found in the available");
 
-    // Group document sources
-    const sources = ragContext.chunks.map(c => ({
-      documentId: c.documentId,
-      title: c.documentTitle,
-      category: c.category,
-      department: c.department,
-      documentType: c.documentType,
-      pageNumber: c.pageNumber,
-      pageDisplay: `Page ${c.pageNumber}`,
-      sourceUrl: c.sourceUrl || null,
-      sourceAuthority: c.sourceAuthority || 'official',
-    }));
+    // Group document sources only if generated from them
+    let sources = [];
+    if (!isAnswerNotFound) {
+      sources = ragContext.chunks.map(c => ({
+        documentId: c.documentId,
+        title: c.documentTitle,
+        category: c.category,
+        department: c.department,
+        documentType: c.documentType,
+        pageNumber: c.pageNumber,
+        pageDisplay: `Page ${c.pageNumber}`,
+        sourceUrl: c.sourceUrl || (c.documentId ? `/api/documents/${c.documentId}/file` : null),
+        sourceAuthority: c.sourceAuthority || 'official',
+      }));
+    }
 
     return {
       answer,

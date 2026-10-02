@@ -61,6 +61,14 @@ export const groupSources = (chunks = []) => {
         : `Pages ${sortedPages.join(', ')}`;
     }
 
+    // Resolve direct URL
+    const resolvedUrl =
+      entry.sourceUrl ||
+      entry.sourcePageUrl ||
+      (entry.documentId && entry.documentId !== 'doc-unknown'
+        ? `/api/documents/${entry.documentId}/file`
+        : null);
+
     sources.push({
       documentId: entry.documentId,
       documentTitle: entry.title,
@@ -74,7 +82,7 @@ export const groupSources = (chunks = []) => {
       pageNumber: sortedPages[0] || 1,
       pages: sortedPages,
       pageDisplay,
-      sourceUrl: entry.sourceUrl,
+      sourceUrl: resolvedUrl,
       sourcePageUrl: entry.sourcePageUrl,
       knowledgeBaseScope: entry.knowledgeBaseScope,
       relevanceScore: Math.round(entry.topScore * 100) / 100,
@@ -83,6 +91,62 @@ export const groupSources = (chunks = []) => {
 
   // Sort sources by relevanceScore descending
   return sources.sort((a, b) => b.relevanceScore - a.relevanceScore);
+};
+
+const STOP_WORDS = new Set([
+  'about', 'above', 'after', 'again', 'against', 'all', 'and', 'any', 'are', 'because', 'been',
+  'before', 'being', 'below', 'between', 'both', 'but', 'by', 'could', 'did', 'does', 'doing',
+  'down', 'during', 'each', 'few', 'for', 'from', 'further', 'had', 'has', 'have', 'having',
+  'he', 'her', 'here', 'hers', 'herself', 'him', 'himself', 'his', 'how', 'into', 'is', 'it',
+  'its', 'itself', 'just', 'more', 'most', 'myself', 'nor', 'not', 'now', 'off', 'once', 'only',
+  'or', 'other', 'ought', 'our', 'ours', 'ourselves', 'out', 'over', 'own', 'same', 'she',
+  'should', 'some', 'such', 'than', 'that', 'the', 'their', 'theirs', 'them', 'themselves',
+  'then', 'there', 'these', 'they', 'this', 'those', 'through', 'too', 'under', 'until', 'up',
+  'very', 'was', 'were', 'what', 'when', 'where', 'which', 'while', 'who', 'whom', 'why', 'with',
+  'would', 'you', 'your', 'yours', 'yourself', 'yourselves'
+]);
+
+/**
+ * Check if a retrieved chunk contributed to the LLM answer
+ */
+export const isChunkUsedInAnswer = (chunk, answer) => {
+  if (!chunk || !chunk.text || !answer) return false;
+  const ansLower = answer.toLowerCase();
+
+  // 1. Direct regulation or clause numbers (e.g. "Regulation 4.2", "clause 3")
+  const regNumbers = chunk.text.match(/\b(?:regulation|rule|clause|section|ordinance)\s+[0-9]+(?:\.[0-9]+)*\b/gi) || [];
+  for (const reg of regNumbers) {
+    if (ansLower.includes(reg.toLowerCase())) return true;
+  }
+
+  // 2. Specific numerical/policy details (e.g. "75%", "Rs 5000", "CGPA 6.5")
+  const specificMetrics = chunk.text.match(/\b[0-9]{1,3}%\b|\b(?:rs\.?|inr)\s*[0-9]+(?:,[0-9]+)?\b|\bcgpa\s+[0-9]+(?:\.[0-9]+)?\b/gi) || [];
+  for (const metric of specificMetrics) {
+    if (ansLower.includes(metric.toLowerCase())) return true;
+  }
+
+  // 3. Document title mention
+  if (chunk.documentTitle && chunk.documentTitle.length > 6) {
+    const titleClean = chunk.documentTitle.toLowerCase().replace(/\.pdf$/i, '').trim();
+    if (titleClean.length > 8 && ansLower.includes(titleClean)) return true;
+  }
+
+  // 4. Substantive keyword overlap (words of length >= 5)
+  const chunkWords = chunk.text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length >= 5 && !STOP_WORDS.has(w));
+
+  let matchedWords = 0;
+  for (const word of new Set(chunkWords)) {
+    if (ansLower.includes(word)) {
+      matchedWords++;
+      if (matchedWords >= 3) return true;
+    }
+  }
+
+  return false;
 };
 
 /**
@@ -284,19 +348,59 @@ export const answerQuestion = async (question, options = {}) => {
   console.log(
     `[RAG] Generating answer with ${retrievedChunks.length} context chunk(s) [Coverage: ${coverageReport.coverage}]...`
   );
-  const answer = await generateAnswer(query, retrievedChunks, { coverageReport });
-  console.log('[RAG] Grounded answer generated successfully');
+  const genResult = await generateAnswer(query, retrievedChunks, { coverageReport });
+  const answer = (genResult && genResult.answer) ? genResult.answer : String(genResult);
+  const usedIndices = (genResult && genResult.usedSourceIndices) ? genResult.usedSourceIndices : [];
+  console.log(`[RAG] Grounded answer generated successfully. Used source indices: [${usedIndices.join(', ')}]`);
 
-  // Format clean, deduplicated and grouped sources
-  const sources = groupSources(retrievedChunks);
+  // Determine if the answer is negative, unverified, or failed to retrieve information from documents
+  const lowerAnswer = answer.toLowerCase();
+  const isAnswerNotFound =
+    lowerAnswer.includes("couldn't find this information") ||
+    lowerAnswer.includes("could not find this information") ||
+    lowerAnswer.includes("cannot find this information") ||
+    lowerAnswer.includes("can't find this information") ||
+    lowerAnswer.includes("not found in the available") ||
+    lowerAnswer.includes("not found in the official") ||
+    lowerAnswer.includes("not found in the currently indexed") ||
+    lowerAnswer.includes("no relevant documents") ||
+    lowerAnswer.includes("no information is available") ||
+    lowerAnswer.includes("no information was found") ||
+    lowerAnswer.includes("do not contain information") ||
+    lowerAnswer.includes("does not contain information") ||
+    coverageReport.coverage === 'INSUFFICIENT';
+
+  // Mention sources ONLY if the response was actually generated from those sources
+  let sources = [];
+  if (!isAnswerNotFound) {
+    let contributingChunks = [];
+
+    // Prioritize explicit source attribution from the LLM
+    if (usedIndices && usedIndices.length > 0) {
+      contributingChunks = usedIndices
+        .map((idx) => retrievedChunks[idx - 1])
+        .filter(Boolean);
+    }
+
+    // Fallback: If LLM didn't output explicit index tag, check content overlap
+    if (contributingChunks.length === 0) {
+      contributingChunks = retrievedChunks.filter((chunk) => isChunkUsedInAnswer(chunk, answer));
+    }
+
+    // If still empty but coverage was FULL and answer is a rich verified response, use top retrieved chunks
+    if (contributingChunks.length === 0 && coverageReport.coverage === 'FULL' && answer.length > 80) {
+      contributingChunks = retrievedChunks.slice(0, 2);
+    }
+
+    // Group only the verified contributing chunks into sources
+    if (contributingChunks.length > 0) {
+      sources = groupSources(contributingChunks);
+    }
+  }
 
   // ----------------------------------------------------
   // STEP 4: Store Grounded Answer in Exact & Semantic Caches
   // ----------------------------------------------------
-  const isAnswerNotFound =
-    answer.toLowerCase().includes("couldn't find this information") ||
-    answer.toLowerCase().includes('not found in the available');
-
   if (!isAnswerNotFound && answer && answer.trim().length > 10) {
     const cachePayload = {
       answer,

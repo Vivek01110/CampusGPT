@@ -68,7 +68,13 @@ STRICT GROUNDING & RETRIEVAL RULES:
 4. Accuracy & Attribution: Accurately preserve all regulation numbers (e.g. Regulation 1.1, 4.2.3), course codes (e.g. CS302, MEIC 416), dates, percentages, and monetary amounts.
 5. Missing Information: If no relevant evidence exists at all, or if the question is ambiguous, follow the guidance provided below. Never guess.
 6. Tone: Provide concise, professional, student-friendly answers without technical retrieval jargon (such as BM25, vectors, or RRF).
-7. Formatting & Headings: Use clear markdown bold headings on their own separate lines (e.g. **Section Title:**) followed by bullet points (* or -) for the detailed items, ensuring structured, clean, and easily scannable answers.`;
+7. Formatting & Headings: Use clear markdown bold headings on their own separate lines (e.g. **Section Title:**) followed by bullet points (* or -) for the detailed items, ensuring structured, clean, and easily scannable answers.
+8. Source Attribution & Usage Tag:
+   - Ground your answer ONLY in the sources that directly contain verified information answering the student's question.
+   - At the VERY END of your response, on a final new line, write which Source numbers you actually retrieved information from:
+     [USED_SOURCES: 1, 2]
+   - If the provided Context does NOT contain information to answer the question, or if you could not find the requested information, state clearly that you couldn't find this information in the official documents, and write:
+     [USED_SOURCES: NONE]`;
 
   const promptText = `CONTEXT FROM OFFICIAL UNIVERSITY DOCUMENTS:
 ${contextBlock || 'NO MATCHING CONTEXT FOUND.'}
@@ -127,7 +133,24 @@ GROUNDED ANSWER:`;
 
         const reply = data.candidates?.[0]?.content?.parts?.[0]?.text;
         if (reply) {
-          return reply.trim();
+          const usedMatch = reply.match(/\[USED_SOURCES:\s*([^\]]+)\]/i);
+          let usedSourceIndices = [];
+          if (usedMatch) {
+            const val = usedMatch[1].trim();
+            if (!val.toLowerCase().includes('none')) {
+              usedSourceIndices = val
+                .split(',')
+                .map((s) => parseInt(s.trim().replace(/[^0-9]/g, ''), 10))
+                .filter((n) => !isNaN(n) && n > 0);
+            }
+          }
+          const cleanAnswer = reply.replace(/\n*\[USED_SOURCES:[^\]]*\]/gi, '').trim();
+
+          // Return string object with attached metadata for 100% backward compatibility
+          const result = new String(cleanAnswer);
+          result.answer = cleanAnswer;
+          result.usedSourceIndices = usedSourceIndices;
+          return result;
         }
       } catch (err) {
         lastError = err;

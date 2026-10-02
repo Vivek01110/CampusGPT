@@ -4,11 +4,15 @@ import {
   getDocuments,
   getDocumentById,
   deleteDocument,
+  getDocumentFile,
 } from '../controllers/documentController.js';
 import { protect, authorize } from '../middleware/authMiddleware.js';
 import { uploadPDF } from '../middleware/uploadMiddleware.js';
 
 const router = express.Router();
+
+// Public / inline PDF file viewing
+router.get('/:id/file', getDocumentFile);
 
 // Admin only: Upload & Ingest PDF document
 router.post(

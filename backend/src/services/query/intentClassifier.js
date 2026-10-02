@@ -30,6 +30,20 @@ export const classifyIntent = (analysis = {}) => {
   const rawQuery = (analysis.rawQuery || '').trim();
   const lower = rawQuery.toLowerCase();
 
+  // 0. General Chat & Greeting Check (pure conversational queries with no policy search)
+  const isPureGreeting = /^(hi|hello|hey|greetings|good\s+(morning|afternoon|evening)|howdy)\b[!?. ]*$/i.test(lower);
+  const isPureThanks = /^(thanks|thank\s+you|thx|many\s+thanks|appreciated)\b[!?. ]*$/i.test(lower);
+  const isIdentity = /^(who\s+are\s+you|what\s+is\s+your\s+name|what\s+can\s+you\s+do|help\s*me|help)\b[!?. ]*$/i.test(lower);
+
+  if (isPureGreeting || isPureThanks || isIdentity) {
+    return {
+      intent: INTENTS.GENERAL_CHAT,
+      queryType: 'chat',
+      confidence: 0.98,
+      clarification: null,
+    };
+  }
+
   // 1. Ambiguous Registration Check
   // Ambiguous: "when is registration?", "what is the registration deadline?", "registration deadline?", "how to register?", "registration date"
   // Unambiguous: "when is course registration?", "when is semester registration?", "when is exam registration?"

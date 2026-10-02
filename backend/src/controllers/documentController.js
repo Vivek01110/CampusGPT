@@ -206,9 +206,48 @@ export const deleteDocument = async (req, res, next) => {
   }
 };
 
+/**
+ * @desc    View / download document file inline in browser
+ * @route   GET /api/documents/:id/file
+ * @access  Public
+ */
+export const getDocumentFile = async (req, res, next) => {
+  try {
+    const doc = await Document.findById(req.params.id);
+
+    if (!doc || doc.isDeleted) {
+      return res.status(404).json({
+        success: false,
+        message: 'Document not found.',
+      });
+    }
+
+    // 1. If file exists on physical storage, stream inline
+    if (doc.storagePath && fs.existsSync(doc.storagePath)) {
+      res.setHeader('Content-Type', doc.mimeType || 'application/pdf');
+      const safeFilename = encodeURIComponent(doc.originalFileName || `${doc.title}.pdf`);
+      res.setHeader('Content-Disposition', `inline; filename="${safeFilename}"`);
+      return fs.createReadStream(doc.storagePath).pipe(res);
+    }
+
+    // 2. If original sourceUrl exists (e.g. official portal link), redirect
+    if (doc.sourceUrl) {
+      return res.redirect(doc.sourceUrl);
+    }
+
+    return res.status(404).json({
+      success: false,
+      message: 'Document file not found on disk.',
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 export default {
   uploadDocument,
   getDocuments,
   getDocumentById,
   deleteDocument,
+  getDocumentFile,
 };

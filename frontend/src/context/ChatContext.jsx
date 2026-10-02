@@ -117,14 +117,22 @@ export const extractTopicName = (text) => {
 
 export const ChatProvider = ({ children }) => {
   const { user } = useAuth();
-  const userId = user?._id || user?.id || 'default_user';
+  const userId = user?._id || user?.id || null;
 
-  const storageKey = `campusgpt_chats_${userId}`;
-  const activeKey = `campusgpt_active_chat_id_${userId}`;
+  const currentUserIdRef = React.useRef(userId);
+
+  // Clean up legacy fallback key if present
+  useEffect(() => {
+    try {
+      localStorage.removeItem('campusgpt_chats_default_user');
+      localStorage.removeItem('campusgpt_active_chat_id_default_user');
+    } catch (e) {}
+  }, []);
 
   const [chats, setChats] = useState(() => {
+    if (!userId) return [];
     try {
-      const saved = localStorage.getItem(storageKey);
+      const saved = localStorage.getItem(`campusgpt_chats_${userId}`);
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed)) return parsed;
@@ -136,10 +144,11 @@ export const ChatProvider = ({ children }) => {
   });
 
   const [activeChatId, setActiveChatId] = useState(() => {
+    if (!userId) return null;
     try {
-      const active = localStorage.getItem(activeKey);
+      const active = localStorage.getItem(`campusgpt_active_chat_id_${userId}`);
       if (active) return active;
-      const saved = localStorage.getItem(storageKey);
+      const saved = localStorage.getItem(`campusgpt_chats_${userId}`);
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
@@ -152,35 +161,24 @@ export const ChatProvider = ({ children }) => {
     }
   });
 
-  // Persist chats whenever updated
+  // Sync state cleanly when user identity changes
   useEffect(() => {
-    try {
-      localStorage.setItem(storageKey, JSON.stringify(chats));
-    } catch (e) {
-      console.warn('Failed to persist chats:', e);
-    }
-  }, [chats, storageKey]);
+    currentUserIdRef.current = userId;
 
-  // Persist activeChatId
-  useEffect(() => {
-    try {
-      if (activeChatId) {
-        localStorage.setItem(activeKey, activeChatId);
-      } else {
-        localStorage.removeItem(activeKey);
-      }
-    } catch (e) {
-      console.warn('Failed to persist activeChatId:', e);
+    if (!userId) {
+      setChats([]);
+      setActiveChatId(null);
+      return;
     }
-  }, [activeChatId, activeKey]);
 
-  // Sync state when user identity changes
-  useEffect(() => {
+    const storageKey = `campusgpt_chats_${userId}`;
+    const activeKey = `campusgpt_active_chat_id_${userId}`;
+
     try {
       const savedChats = localStorage.getItem(storageKey);
       if (savedChats) {
         const parsed = JSON.parse(savedChats);
-        setChats(parsed);
+        setChats(Array.isArray(parsed) ? parsed : []);
       } else {
         setChats([]);
       }
@@ -189,19 +187,57 @@ export const ChatProvider = ({ children }) => {
       setChats([]);
       setActiveChatId(null);
     }
-  }, [storageKey, activeKey]);
+  }, [userId]);
 
-  // Import existing history from backend database only once if local chats are completely empty
+  // Persist chats strictly for the current active user
   useEffect(() => {
+    if (!userId || currentUserIdRef.current !== userId) return;
+    try {
+      const storageKey = `campusgpt_chats_${userId}`;
+      localStorage.setItem(storageKey, JSON.stringify(chats));
+    } catch (e) {
+      console.warn('Failed to persist chats:', e);
+    }
+  }, [chats, userId]);
+
+  // Persist activeChatId strictly for the current active user
+  useEffect(() => {
+    if (!userId || currentUserIdRef.current !== userId) return;
+    try {
+      const activeKey = `campusgpt_active_chat_id_${userId}`;
+      if (activeChatId) {
+        localStorage.setItem(activeKey, activeChatId);
+      } else {
+        localStorage.removeItem(activeKey);
+      }
+    } catch (e) {
+      console.warn('Failed to persist activeChatId:', e);
+    }
+  }, [activeChatId, userId]);
+
+  // Import existing history from backend database only once if user's local chats are completely empty
+  useEffect(() => {
+    if (!userId) return;
+
     const importBackendHistory = async () => {
-      if (chats.length > 0) return;
-      const alreadyChecked = sessionStorage.getItem(`campusgpt_checked_${userId}`);
-      if (alreadyChecked) return;
-      sessionStorage.setItem(`campusgpt_checked_${userId}`, 'true');
+      const storageKey = `campusgpt_chats_${userId}`;
+      const saved = localStorage.getItem(storageKey);
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved);
+          if (Array.isArray(parsed) && parsed.length > 0) return;
+        } catch (e) {}
+      }
+
+      const checkedKey = `campusgpt_checked_${userId}`;
+      if (sessionStorage.getItem(checkedKey)) return;
+      sessionStorage.setItem(checkedKey, 'true');
 
       try {
         const res = await chatAPI.getHistory();
         if (res?.data?.messages && res.data.messages.length > 0) {
+          if (currentUserIdRef.current !== userId) return;
+
           const formattedMessages = res.data.messages.map((m) => ({
             id: m._id || `hist-${Date.now()}-${Math.random()}`,
             sender: m.role,
@@ -224,8 +260,7 @@ export const ChatProvider = ({ children }) => {
           };
 
           setChats([importedChat]);
-          // Only activate if user has not explicitly clicked New Chat
-          setActiveChatId((curr) => curr || importedChat.id);
+          setActiveChatId(importedChat.id);
         }
       } catch (err) {
         // Non-blocking
@@ -233,7 +268,7 @@ export const ChatProvider = ({ children }) => {
     };
 
     importBackendHistory();
-  }, [userId, chats.length]);
+  }, [userId]);
 
   // Resolve current active chat
   const activeChat = chats.find((c) => c.id === activeChatId) || null;
@@ -245,20 +280,36 @@ export const ChatProvider = ({ children }) => {
   const createNewChat = () => {
     const newId = `chat_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     setActiveChatId(newId);
-    try {
-      localStorage.setItem(activeKey, newId);
-    } catch (e) {}
+    if (userId) {
+      try {
+        localStorage.setItem(`campusgpt_active_chat_id_${userId}`, newId);
+      } catch (e) {}
+    }
     return newId;
   };
 
   /**
-   * Switch to an existing chat from the sidebar folder
+   * Switch to an existing chat from the sidebar
    */
   const selectChat = (chatId) => {
     setActiveChatId(chatId);
-    try {
-      localStorage.setItem(activeKey, chatId);
-    } catch (e) {}
+    if (userId) {
+      try {
+        localStorage.setItem(`campusgpt_active_chat_id_${userId}`, chatId);
+      } catch (e) {}
+    }
+  };
+
+  /**
+   * Rename a chat session
+   */
+  const renameChat = (chatId, newTitle) => {
+    if (!newTitle || !newTitle.trim()) return;
+    setChats((prev) =>
+      prev.map((c) =>
+        c.id === chatId ? { ...c, title: newTitle.trim(), updatedAt: Date.now() } : c
+      )
+    );
   };
 
   /**
@@ -348,6 +399,7 @@ export const ChatProvider = ({ children }) => {
         activeMessages,
         createNewChat,
         selectChat,
+        renameChat,
         deleteChat,
         addMessageToActiveChat,
         addAssistantMessageToActiveChat,

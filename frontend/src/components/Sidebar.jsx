@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useChat } from '../context/ChatContext';
@@ -13,19 +13,42 @@ import {
   Plus,
   LogOut,
   Trash2,
-  FolderArchive,
-  Folder,
-  FolderOpen,
   ChevronDown,
   X,
+  MoreVertical,
+  Pencil,
+  Check,
 } from 'lucide-react';
 
 const Sidebar = ({ mobileOpen, setMobileOpen }) => {
   const { user, isAdmin, logout } = useAuth();
-  const { chats, activeChatId, createNewChat, selectChat, deleteChat } = useChat();
+  const { chats, activeChatId, createNewChat, selectChat, renameChat, deleteChat } = useChat();
   const [chatsFolderOpen, setChatsFolderOpen] = useState(true);
+  const [activeMenuChatId, setActiveMenuChatId] = useState(null);
+  const [editingChatId, setEditingChatId] = useState(null);
+  const [editingTitle, setEditingTitle] = useState('');
+  const renameInputRef = useRef(null);
   const location = useLocation();
   const navigate = useNavigate();
+
+  // Close 3-dot dropdown menu on outside click
+  useEffect(() => {
+    const handleOutsideClick = () => {
+      setActiveMenuChatId(null);
+    };
+    if (activeMenuChatId) {
+      window.addEventListener('click', handleOutsideClick);
+      return () => window.removeEventListener('click', handleOutsideClick);
+    }
+  }, [activeMenuChatId]);
+
+  // Focus rename input when editing starts
+  useEffect(() => {
+    if (editingChatId && renameInputRef.current) {
+      renameInputRef.current.focus();
+      renameInputRef.current.select();
+    }
+  }, [editingChatId]);
 
   const handleLogout = async () => {
     await logout();
@@ -46,6 +69,13 @@ const Sidebar = ({ mobileOpen, setMobileOpen }) => {
       navigate('/assistant');
     }
     if (setMobileOpen) setMobileOpen(false);
+  };
+
+  const handleSaveRename = (chatId) => {
+    if (editingTitle && editingTitle.trim()) {
+      renameChat(chatId, editingTitle.trim());
+    }
+    setEditingChatId(null);
   };
 
   const navItems = [
@@ -101,80 +131,10 @@ const Sidebar = ({ mobileOpen, setMobileOpen }) => {
         </button>
       </div>
 
-      {/* Scrollable Center: Chat Folder & Navigation */}
+      {/* Scrollable Center: Explore Campus navigation first, then Chats below */}
       <div className="flex-1 overflow-y-auto px-3 py-1 space-y-4">
-        {/* Previous Chats Folders */}
+        {/* Campus Navigation Links (Explore Campus above Chats) */}
         <div>
-          <button
-            type="button"
-            onClick={() => setChatsFolderOpen((prev) => !prev)}
-            className="w-full flex items-center justify-between px-2 py-1.5 text-[11px] font-mono uppercase tracking-wider text-campus-muted hover:text-white transition-colors"
-          >
-            <span className="flex items-center gap-1.5">
-              <FolderArchive className="w-3.5 h-3.5 text-blue-400" />
-              <span>Chat Folders</span>
-            </span>
-            <div className="flex items-center gap-1">
-              {chats.length > 0 && (
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-campus-card text-campus-muted font-sans font-medium">
-                  {chats.length}
-                </span>
-              )}
-              <ChevronDown
-                className={`w-3.5 h-3.5 text-campus-muted transition-transform duration-200 ${
-                  chatsFolderOpen ? '' : '-rotate-90'
-                }`}
-              />
-            </div>
-          </button>
-
-          {chatsFolderOpen && (
-            <div className="space-y-1 mt-1">
-              {chats.length === 0 ? (
-                <p className="px-2.5 py-2 text-xs text-campus-muted/70 italic text-left">
-                  No saved chat folders yet.
-                </p>
-              ) : (
-                chats.map((chat) => {
-                  const isCurrent =
-                    activeChatId === chat.id && location.pathname === '/assistant';
-                  return (
-                    <div
-                      key={chat.id}
-                      onClick={() => handleSelectChat(chat.id)}
-                      className={`group flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg text-xs cursor-pointer transition-colors ${
-                        isCurrent
-                          ? 'bg-campus-card text-white font-medium border border-campus-border shadow-sm'
-                          : 'text-campus-muted hover:text-white hover:bg-campus-card/50'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2 min-w-0 flex-1">
-                        {isCurrent ? (
-                          <FolderOpen className="w-3.5 h-3.5 flex-shrink-0 text-blue-400" />
-                        ) : (
-                          <Folder className="w-3.5 h-3.5 flex-shrink-0 text-zinc-400 group-hover:text-blue-400 transition-colors" />
-                        )}
-                        <span className="truncate">{chat.title || 'Inquiry Topic'}</span>
-                      </div>
-
-                      {/* Delete folder/chat button */}
-                      <button
-                        onClick={(e) => deleteChat(chat.id, e)}
-                        title="Delete chat folder"
-                        className="opacity-70 md:opacity-0 md:group-hover:opacity-100 p-1 rounded hover:bg-zinc-700/60 hover:text-red-400 text-campus-muted transition-all flex-shrink-0"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Campus Navigation Links */}
-        <div className="pt-2 border-t border-campus-border/60">
           <div className="text-[11px] font-mono uppercase tracking-wider text-campus-muted px-2 py-1">
             Explore Campus
           </div>
@@ -199,6 +159,160 @@ const Sidebar = ({ mobileOpen, setMobileOpen }) => {
               );
             })}
           </div>
+        </div>
+
+        {/* Chats Section */}
+        <div className="pt-2 border-t border-campus-border/60">
+          <button
+            type="button"
+            onClick={() => setChatsFolderOpen((prev) => !prev)}
+            className="w-full flex items-center justify-between px-2 py-1.5 text-[11px] font-mono uppercase tracking-wider text-campus-muted hover:text-white transition-colors"
+          >
+            <span className="flex items-center gap-1.5">
+              <MessageSquare className="w-3.5 h-3.5 text-blue-400" />
+              <span>Chats</span>
+            </span>
+            <div className="flex items-center gap-1">
+              {chats.length > 0 && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-campus-card text-campus-muted font-sans font-medium">
+                  {chats.length}
+                </span>
+              )}
+              <ChevronDown
+                className={`w-3.5 h-3.5 text-campus-muted transition-transform duration-200 ${
+                  chatsFolderOpen ? '' : '-rotate-90'
+                }`}
+              />
+            </div>
+          </button>
+
+          {chatsFolderOpen && (
+            <div className="space-y-1 mt-1">
+              {chats.length === 0 ? (
+                <p className="px-2.5 py-2 text-xs text-campus-muted/70 italic text-left">
+                  No saved chats yet.
+                </p>
+              ) : (
+                chats.map((chat) => {
+                  const isCurrent =
+                    activeChatId === chat.id && location.pathname === '/assistant';
+                  const isEditing = editingChatId === chat.id;
+                  const isMenuOpen = activeMenuChatId === chat.id;
+
+                  return (
+                    <div
+                      key={chat.id}
+                      onClick={() => !isEditing && handleSelectChat(chat.id)}
+                      className={`group relative flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg text-xs cursor-pointer transition-colors ${
+                        isCurrent
+                          ? 'bg-campus-card text-white font-medium border border-campus-border shadow-sm'
+                          : 'text-campus-muted hover:text-white hover:bg-campus-card/50'
+                      }`}
+                    >
+                      {isEditing ? (
+                        <div
+                          className="flex items-center gap-1.5 w-full"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <input
+                            ref={renameInputRef}
+                            type="text"
+                            value={editingTitle}
+                            onChange={(e) => setEditingTitle(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') handleSaveRename(chat.id);
+                              if (e.key === 'Escape') setEditingChatId(null);
+                            }}
+                            className="flex-1 min-w-0 bg-zinc-900 border border-blue-500/60 rounded px-1.5 py-0.5 text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleSaveRename(chat.id)}
+                            title="Save name"
+                            className="p-1 rounded hover:bg-zinc-700 text-emerald-400 flex-shrink-0"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditingChatId(null)}
+                            title="Cancel"
+                            className="p-1 rounded hover:bg-zinc-700 text-zinc-400 flex-shrink-0"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="flex items-center gap-2 min-w-0 flex-1">
+                            <MessageSquare
+                              className={`w-3.5 h-3.5 flex-shrink-0 ${
+                                isCurrent ? 'text-blue-400' : 'text-zinc-400 group-hover:text-blue-400'
+                              } transition-colors`}
+                            />
+                            <span className="truncate">{chat.title || 'Campus Inquiry'}</span>
+                          </div>
+
+                          {/* 3-dot options menu */}
+                          <div
+                            className="relative flex-shrink-0"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setActiveMenuChatId((prev) => (prev === chat.id ? null : chat.id));
+                              }}
+                              title="Chat options"
+                              className={`p-1 rounded text-campus-muted hover:text-white hover:bg-zinc-700/60 transition-all ${
+                                isMenuOpen
+                                  ? 'opacity-100 bg-zinc-700/60 text-white'
+                                  : 'opacity-70 md:opacity-0 md:group-hover:opacity-100'
+                              }`}
+                            >
+                              <MoreVertical className="w-3.5 h-3.5" />
+                            </button>
+
+                            {/* Dropdown Menu */}
+                            {isMenuOpen && (
+                              <div className="absolute right-0 top-full mt-1 w-32 bg-zinc-900 border border-campus-border rounded-lg shadow-xl py-1 z-50 animate-in fade-in zoom-in-95 duration-100">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setEditingChatId(chat.id);
+                                    setEditingTitle(chat.title || '');
+                                    setActiveMenuChatId(null);
+                                  }}
+                                  className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-zinc-200 hover:text-white hover:bg-campus-card transition-colors text-left"
+                                >
+                                  <Pencil className="w-3.5 h-3.5 text-blue-400" />
+                                  <span>Rename</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setActiveMenuChatId(null);
+                                    deleteChat(chat.id, e);
+                                  }}
+                                  className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-red-400 hover:text-red-300 hover:bg-red-500/10 transition-colors text-left"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                  <span>Delete</span>
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          )}
         </div>
       </div>
 
