@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { ChatProvider } from './context/ChatContext';
 import Sidebar from './components/Sidebar';
@@ -28,6 +28,8 @@ const RootRedirect = () => {
 function AppContent() {
   const { isAuthenticated } = useAuth();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const location = useLocation();
+  const isAssistantPage = location.pathname === '/assistant' || location.pathname === '/';
 
   return (
     <div className="min-h-screen bg-campus-bg text-campus-text flex font-sans">
@@ -38,8 +40,8 @@ function AppContent() {
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0 h-screen overflow-hidden">
-        {/* Mobile Header Bar (when authenticated) */}
-        {isAuthenticated && (
+        {/* Mobile Header Bar (for pages other than /assistant, which has its own dedicated header) */}
+        {isAuthenticated && !isAssistantPage && (
           <header className="md:hidden flex items-center justify-between px-3 py-2 bg-campus-sidebar border-b border-campus-border z-20 flex-shrink-0">
             <button
               onClick={() => setMobileOpen(true)}

@@ -189,15 +189,18 @@ export const ChatProvider = ({ children }) => {
     }
   }, [userId]);
 
-  // Persist chats strictly for the current active user
+  // Persist chats strictly for the current active user (debounced for streaming performance)
   useEffect(() => {
     if (!userId || currentUserIdRef.current !== userId) return;
-    try {
-      const storageKey = `campusgpt_chats_${userId}`;
-      localStorage.setItem(storageKey, JSON.stringify(chats));
-    } catch (e) {
-      console.warn('Failed to persist chats:', e);
-    }
+    const timer = setTimeout(() => {
+      try {
+        const storageKey = `campusgpt_chats_${userId}`;
+        localStorage.setItem(storageKey, JSON.stringify(chats));
+      } catch (e) {
+        console.warn('Failed to persist chats:', e);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
   }, [chats, userId]);
 
   // Persist activeChatId strictly for the current active user
@@ -390,6 +393,31 @@ export const ChatProvider = ({ children }) => {
     );
   };
 
+  /**
+   * Update an existing message in a chat session (for SSE streaming chunks, status, sources)
+   */
+  const updateMessageInChat = (messageId, updater, targetChatId) => {
+    const targetId = targetChatId || activeChatId;
+    setChats((prev) =>
+      prev.map((c) => {
+        if (c.id === targetId) {
+          const updatedMessages = (c.messages || []).map((msg) => {
+            if (msg.id === messageId) {
+              return typeof updater === 'function' ? updater(msg) : { ...msg, ...updater };
+            }
+            return msg;
+          });
+          return {
+            ...c,
+            messages: updatedMessages,
+            updatedAt: Date.now(),
+          };
+        }
+        return c;
+      })
+    );
+  };
+
   return (
     <ChatContext.Provider
       value={{
@@ -403,6 +431,7 @@ export const ChatProvider = ({ children }) => {
         deleteChat,
         addMessageToActiveChat,
         addAssistantMessageToActiveChat,
+        updateMessageInChat,
       }}
     >
       {children}

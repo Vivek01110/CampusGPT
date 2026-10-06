@@ -55,7 +55,7 @@ async function request(endpoint, options = {}) {
     // Re-throw formatted error
     if (error.message === 'Failed to fetch') {
       console.error(`[AskCampusAi API Error] Failed to fetch from: ${url}`, error);
-      throw new Error(`Unable to connect to backend server (${url}). If Render is waking up from sleep, wait 30-60s and try again.`);
+      throw new Error('CampusGPT is currently connecting to campus records. Please try again in a moment.');
     }
     throw error;
   }
@@ -138,6 +138,123 @@ export const chatAPI = {
       method: 'POST',
       body: JSON.stringify({ message }),
     }),
+
+  /**
+   * Submit student query to RAG assistant using Server-Sent Events (SSE) streaming
+   * @param {string} message
+   * @param {object} options
+   * @param {object} callbacks - { onConnected, onStatus, onMetadata, onSources, onToken, onDone, onError }
+   * @param {AbortSignal} [signal]
+   */
+  streamMessage: async (message, options = {}, callbacks = {}, signal = null) => {
+    const token = localStorage.getItem('askcampus_token');
+    const cleanEndpoint = '/chat/stream';
+    const url = `${API_BASE_URL}${cleanEndpoint}`;
+
+    const headers = {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    };
+
+    let response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ message, options }),
+        signal,
+      });
+    } catch (err) {
+      if (err.name === 'AbortError') return;
+      console.warn('[AskCampusAi Stream Network Error]', err);
+      throw new Error('CampusGPT is currently connecting to campus records. Please try again in a moment.');
+    }
+
+    if (!response.ok) {
+      if (response.status === 401) {
+        localStorage.removeItem('askcampus_token');
+        localStorage.removeItem('askcampus_user');
+      }
+      let errData = {};
+      try {
+        errData = await response.json();
+      } catch {}
+      throw new Error(errData.message || `Request failed with status ${response.status}`);
+    }
+
+    if (!response.body) {
+      throw new Error('ReadableStream not supported by this browser environment');
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // keep last partial line
+
+        let currentEvent = 'message';
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) {
+            currentEvent = 'message';
+            continue;
+          }
+
+          if (trimmed.startsWith('event:')) {
+            currentEvent = trimmed.slice(6).trim();
+            continue;
+          }
+
+          if (trimmed.startsWith('data:')) {
+            const dataStr = trimmed.slice(5).trim();
+            if (!dataStr) continue;
+
+            try {
+              const data = JSON.parse(dataStr);
+              switch (currentEvent) {
+                case 'connected':
+                  callbacks.onConnected?.(data);
+                  break;
+                case 'status':
+                  callbacks.onStatus?.(data.message || data);
+                  break;
+                case 'metadata':
+                  callbacks.onMetadata?.(data);
+                  break;
+                case 'sources':
+                  callbacks.onSources?.(data.sources || []);
+                  break;
+                case 'token':
+                  callbacks.onToken?.(data.token || '');
+                  break;
+                case 'done':
+                  callbacks.onDone?.(data);
+                  break;
+                case 'error':
+                  callbacks.onError?.(data);
+                  break;
+                default:
+                  break;
+              }
+            } catch (jsonErr) {
+              // Ignore partial JSON
+            }
+          }
+        }
+      }
+    } catch (streamErr) {
+      if (streamErr.name === 'AbortError') return;
+      console.warn('[SSE Read Error]', streamErr);
+      throw streamErr;
+    }
+  },
 
   /**
    * Retrieve previous chat dialogue history
