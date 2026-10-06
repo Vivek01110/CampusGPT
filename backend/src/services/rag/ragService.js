@@ -2,6 +2,7 @@ import { retrieveHybridContext } from '../retrieval/hybridRetriever.js';
 import { retrieveVectorCandidates } from '../retrieval/vectorRetriever.js';
 import { generateAnswer } from '../ai/llmService.js';
 import { assessEvidenceCoverage } from './evidenceAssessor.js';
+import { assessEvidenceLLM } from './evidenceAssessmentService.js';
 import { analyzeQuery } from '../query/queryAnalyzer.js';
 import exactQueryCache from '../cache/exactQueryCache.js';
 import semanticCache from '../cache/semanticCache.js';
@@ -27,6 +28,9 @@ export const groupSources = (chunks = []) => {
         department: chunk.department || 'General',
         documentType: chunk.documentType || 'regulation',
         sourceAuthority: chunk.sourceAuthority || 'official',
+        sourceType: chunk.sourceType || (chunk.sourceUrl?.includes('drive.google.com') ? 'student_drive' : 'official_nitkkr'),
+        sourceTrust: chunk.sourceTrust || (chunk.sourceType === 'student_drive' || chunk.sourceUrl?.includes('drive.google.com') ? 'community' : 'official'),
+        sourceName: chunk.sourceName || (chunk.sourceType === 'student_drive' || chunk.sourceUrl?.includes('drive.google.com') ? 'NIT KKR PYQ Drive' : 'NIT Kurukshetra Official Website'),
         year: chunk.year || null,
         academicYear: chunk.academicYear || null,
         pages: new Set(),
@@ -42,6 +46,7 @@ export const groupSources = (chunks = []) => {
     if (chunk.pageNumber) docEntry.pages.add(chunk.pageNumber);
     if (chunk.chunkIndex !== undefined) docEntry.chunkIndices.push(chunk.chunkIndex);
     if (!docEntry.sourcePageUrl && chunk.sourcePageUrl) docEntry.sourcePageUrl = chunk.sourcePageUrl;
+    if (!docEntry.sourceUrl && chunk.sourceUrl) docEntry.sourceUrl = chunk.sourceUrl;
     const score = chunk.rerankScore || chunk.rrfScore || chunk.score || 0;
     if (score > docEntry.topScore) docEntry.topScore = score;
   }
@@ -76,6 +81,9 @@ export const groupSources = (chunks = []) => {
       category: entry.category,
       department: entry.department,
       documentType: entry.documentType,
+      sourceType: entry.sourceType,
+      sourceTrust: entry.sourceTrust,
+      sourceName: entry.sourceName,
       sourceAuthority: entry.sourceAuthority || 'official',
       year: entry.year,
       academicYear: entry.academicYear,
@@ -263,82 +271,75 @@ export const answerQuestion = async (question, options = {}) => {
   let diagnostics = {};
   let analysis = {};
 
+  const queryToSearch = options.rewrittenQuery || query;
+
   if (options.mode === 'vector_only') {
     const topK = options.topK || parseInt(process.env.RAG_TOP_K, 10) || 5;
-    analysis = analyzeQuery(query);
-    retrievedChunks = await retrieveVectorCandidates(query, {
+    analysis = analyzeQuery(queryToSearch);
+    retrievedChunks = await retrieveVectorCandidates(queryToSearch, {
       limit: topK,
       filters: options.filters,
     });
     diagnostics = { mode: 'vector_only', chunkCount: retrievedChunks.length };
   } else {
-    const hybridResult = await retrieveHybridContext(query, options);
+    const hybridResult = await retrieveHybridContext(queryToSearch, options);
     retrievedChunks = hybridResult.chunks;
     diagnostics = hybridResult.diagnostics;
-    analysis = hybridResult.analysis || analyzeQuery(query);
+    analysis = hybridResult.analysis || analyzeQuery(queryToSearch);
   }
 
-  // Assess evidence coverage across retrieved chunks
-  const coverageReport = assessEvidenceCoverage(query, analysis, retrievedChunks);
+  // Assess evidence coverage dynamically using Gemini LLM (Claim-level validation)
+  let coverageReport = await assessEvidenceLLM(query, retrievedChunks);
   diagnostics.coverage = coverageReport.coverage;
-  diagnostics.requestedFields = coverageReport.requestedFields;
-  diagnostics.supportedFields = coverageReport.supportedFields;
-  diagnostics.missingFields = coverageReport.missingFields;
+  diagnostics.confidence = coverageReport.confidence;
+  diagnostics.supportedClaims = coverageReport.supportedClaims;
+  diagnostics.unsupportedClaims = coverageReport.unsupportedClaims;
 
-  // Ambiguous Exam Schedule Clarification check:
-  // e.g. "Give me the mid exam schedule." without semester or program
-  const isAmbiguousExamQuery =
-    (analysis.examType || /\b(mid exam|end exam|exam schedule|midsem schedule|datesheet)\b/i.test(query)) &&
-    !analysis.semester &&
-    !analysis.program &&
-    !analysis.courseCode;
+  // RETRIEVAL RETRY: If first retrieval was insufficient and we haven't retried yet,
+  // attempt a second retrieval using expanded terms or combined queries
+  if (!coverageReport.sufficient && !options._isRetry) {
+    const expandedTerms = options.expandedTerms || [];
+    const retryQuery = expandedTerms.length > 0
+      ? `${query} ${expandedTerms.slice(0, 4).join(' ')}`
+      : options.rewrittenQuery && options.rewrittenQuery !== query
+        ? options.rewrittenQuery
+        : null;
 
-  if (isAmbiguousExamQuery && (coverageReport.coverage === 'INSUFFICIENT' || retrievedChunks.length === 0)) {
-    const clarificationQuestion = 'Which programme and semester are you asking about?';
-    const clarificationOptions = [
-      '7th semester CSE',
-      '5th semester CSE',
-      '7th semester ECE',
-      '3rd semester Mechanical',
-    ];
+    if (retryQuery && retryQuery !== queryToSearch) {
+      console.log(`[RAG RETRY] Evidence insufficient on first retrieval. Retrying with expanded query: "${retryQuery}"...`);
+      const retryResult = await retrieveHybridContext(retryQuery, { ...options, _isRetry: true });
+      if (retryResult.chunks && retryResult.chunks.length > 0) {
+        // Merge chunks without duplicates
+        const existingIds = new Set(retrievedChunks.map(c => c.chunkId || `${c.documentId}_${c.chunkIndex}`));
+        const newChunks = retryResult.chunks.filter(c => !existingIds.has(c.chunkId || `${c.documentId}_${c.chunkIndex}`));
+        const mergedChunks = [...retrievedChunks, ...newChunks];
 
-    const clarificationAnswer = `${clarificationQuestion}\n\nFor example:\n${clarificationOptions
-      .map((opt) => `• ${opt}`)
-      .join('\n')}\n\nPlease specify your semester and branch so I can retrieve the exact examination datesheet.`;
-
-    return {
-      answer: clarificationAnswer,
-      sources: [],
-      retrievedCount: 0,
-      coverage: 'CLARIFICATION',
-      requestedFields: coverageReport.requestedFields,
-      supportedFields: [],
-      missingFields: coverageReport.requestedFields,
-      clarification: {
-        needed: true,
-        question: clarificationQuestion,
-        options: clarificationOptions,
-      },
-      diagnostics,
-      cache: { hit: false, type: 'miss' },
-    };
+        if (mergedChunks.length > 0) {
+          const retryAssessment = await assessEvidenceLLM(query, mergedChunks);
+          if (retryAssessment.sufficient || retryAssessment.confidence > coverageReport.confidence) {
+            console.log(`[RAG RETRY] Successful! New coverage: ${retryAssessment.coverage} (Confidence: ${retryAssessment.confidence})`);
+            retrievedChunks = mergedChunks;
+            coverageReport = retryAssessment;
+            diagnostics.coverage = coverageReport.coverage;
+            diagnostics.retried = true;
+          }
+        }
+      }
+    }
   }
 
   // Anti-hallucination check: if genuinely no relevant context found
-  if (!retrievedChunks || retrievedChunks.length === 0 || coverageReport.coverage === 'INSUFFICIENT') {
-    const unverifiedAnswer =
-      analysis.semester && analysis.department
-        ? `I couldn't verify the ${analysis.semester}th-semester ${analysis.department} mid-semester schedule from the currently indexed official documents.`
-        : "I couldn't find this information in the available university documents.";
+  if (!retrievedChunks || retrievedChunks.length === 0 || !coverageReport.sufficient) {
+    const unverifiedAnswer = "I couldn't find this information in the available university documents.";
 
     return {
       answer: unverifiedAnswer,
       sources: [],
       retrievedCount: 0,
       coverage: 'INSUFFICIENT',
-      requestedFields: coverageReport.requestedFields,
-      supportedFields: [],
-      missingFields: coverageReport.missingFields,
+      requestedFields: coverageReport.unsupportedClaims || [],
+      supportedFields: coverageReport.supportedClaims || [],
+      missingFields: coverageReport.unsupportedClaims || [],
       diagnostics,
       cache: { hit: false, type: 'miss' },
     };

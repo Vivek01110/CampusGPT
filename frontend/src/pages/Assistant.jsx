@@ -1,6 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
 import { useAuth } from '../context/AuthContext';
 import { useChat } from '../context/ChatContext';
 import { chatAPI } from '../services/api';
@@ -18,6 +21,8 @@ import {
   ShieldAlert,
   Building,
   ExternalLink,
+  Copy,
+  Check,
 } from 'lucide-react';
 
 const getSourceUrl = (src) => {
@@ -74,6 +79,75 @@ const SUGGESTED_PROMPTS = [
     prompt: 'What are the hostel curfew timings and disciplinary rules?',
   },
 ];
+
+const formatMarkdownContent = (text) => {
+  if (!text || typeof text !== 'string') return '';
+  let processed = text;
+  // Normalize LaTeX delimiters \( ... \) -> $ ... $ and \[ ... \] -> $$ ... $$
+  processed = processed.replace(/\\\((.*?)\\\)/gs, '$$$1$$');
+  processed = processed.replace(/\\\[(.*?)\\\]/gs, '$$$$$1$$$$');
+  // Fix headings without space: e.g. "###Heading" -> "### Heading"
+  processed = processed.replace(/^(#{1,6})([^\s#])/gm, '$1 $2');
+  return processed;
+};
+
+const CodeBlock = ({ className, children }) => {
+  const [copied, setCopied] = useState(false);
+  const match = /language-(\w+)/.exec(className || '');
+  const language = match ? match[1] : '';
+
+  const extractText = (elem) => {
+    if (!elem) return '';
+    if (typeof elem === 'string') return elem;
+    if (typeof elem === 'number') return String(elem);
+    if (Array.isArray(elem)) return elem.map(extractText).join('');
+    if (elem?.props?.children) return extractText(elem.props.children);
+    return '';
+  };
+
+  const rawCode = extractText(children).replace(/\n$/, '');
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(rawCode);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Fallback
+    }
+  };
+
+  return (
+    <div className="my-3 rounded-xl overflow-hidden border border-campus-border bg-[#141517] shadow-sm">
+      <div className="flex items-center justify-between px-3.5 py-1.5 bg-[#1b1c20] border-b border-campus-border/70 text-[11px] text-campus-muted font-mono select-none">
+        <span className="uppercase font-semibold tracking-wider text-zinc-400">
+          {language || 'code'}
+        </span>
+        <button
+          onClick={handleCopy}
+          type="button"
+          className="flex items-center gap-1.5 px-2 py-0.5 rounded hover:bg-zinc-700/60 hover:text-white transition-colors cursor-pointer"
+          title="Copy code"
+        >
+          {copied ? (
+            <>
+              <Check className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="text-emerald-400">Copied!</span>
+            </>
+          ) : (
+            <>
+              <Copy className="w-3.5 h-3.5" />
+              <span>Copy</span>
+            </>
+          )}
+        </button>
+      </div>
+      <pre className="p-3.5 overflow-x-auto text-xs font-mono leading-relaxed text-zinc-200">
+        <code>{rawCode}</code>
+      </pre>
+    </div>
+  );
+};
 
 const Assistant = ({ onOpenMobileNav }) => {
   const { user } = useAuth();
@@ -255,48 +329,117 @@ const Assistant = ({ onOpenMobileNav }) => {
                         ) : (
                           <div className="space-y-2">
                             <ReactMarkdown
+                              remarkPlugins={[remarkGfm, remarkMath]}
+                              rehypePlugins={[rehypeKatex]}
                               components={{
-                                strong: ({ children }) => (
-                                  <strong className="font-semibold text-white tracking-wide">{children}</strong>
+                                h1: ({ children }) => (
+                                  <h1 className="text-lg sm:text-xl font-bold text-white mt-5 mb-2.5 tracking-tight first:mt-0 pb-1 border-b border-campus-border/40">
+                                    {children}
+                                  </h1>
+                                ),
+                                h2: ({ children }) => (
+                                  <h2 className="text-base sm:text-lg font-bold text-white mt-4 mb-2 tracking-tight first:mt-0">
+                                    {children}
+                                  </h2>
+                                ),
+                                h3: ({ children }) => (
+                                  <h3 className="text-sm sm:text-base font-semibold text-white mt-3.5 mb-1.5 first:mt-0">
+                                    {children}
+                                  </h3>
+                                ),
+                                h4: ({ children }) => (
+                                  <h4 className="text-xs sm:text-sm font-semibold text-zinc-300 mt-3 mb-1 first:mt-0">
+                                    {children}
+                                  </h4>
                                 ),
                                 p: ({ children }) => (
-                                  <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>
+                                  <p className="mb-2.5 last:mb-0 leading-relaxed text-campus-text">
+                                    {children}
+                                  </p>
                                 ),
                                 ul: ({ children }) => (
-                                  <ul className="space-y-1.5 my-2 list-disc pl-5 marker:text-blue-400">
+                                  <ul className="space-y-1.5 my-2.5 list-disc pl-5 marker:text-blue-400/80 leading-relaxed">
                                     {children}
                                   </ul>
                                 ),
                                 ol: ({ children }) => (
-                                  <ol className="space-y-1.5 my-2 list-decimal pl-5 marker:text-blue-400">
+                                  <ol className="space-y-1.5 my-2.5 list-decimal pl-5 marker:text-blue-400/80 leading-relaxed">
                                     {children}
                                   </ol>
                                 ),
                                 li: ({ children }) => (
-                                  <li className="leading-relaxed pl-0.5">{children}</li>
+                                  <li className="leading-relaxed pl-0.5 my-0.5">
+                                    {children}
+                                  </li>
                                 ),
-                                h1: ({ children }) => (
-                                  <h1 className="text-base font-bold text-white mt-3 mb-1.5 tracking-tight">{children}</h1>
+                                strong: ({ children }) => (
+                                  <strong className="font-semibold text-white tracking-wide">
+                                    {children}
+                                  </strong>
                                 ),
-                                h2: ({ children }) => (
-                                  <h2 className="text-sm sm:text-base font-bold text-white mt-3 mb-1.5 tracking-tight">{children}</h2>
+                                em: ({ children }) => (
+                                  <em className="italic text-zinc-300">{children}</em>
                                 ),
-                                h3: ({ children }) => (
-                                  <h3 className="text-sm font-semibold text-white mt-2.5 mb-1">{children}</h3>
-                                ),
-                                code: ({ inline, children }) =>
-                                  inline ? (
-                                    <code className="px-1.5 py-0.5 rounded bg-campus-bg text-blue-300 font-mono text-xs">
+                                pre: ({ children }) => {
+                                  const codeProps = children?.props || {};
+                                  return (
+                                    <CodeBlock className={codeProps.className}>
+                                      {codeProps.children || children}
+                                    </CodeBlock>
+                                  );
+                                },
+                                code: ({ node, className, children, ...props }) => {
+                                  return (
+                                    <code
+                                      className="px-1.5 py-0.5 mx-0.5 rounded-md bg-[#141517] border border-campus-border/60 text-blue-300 font-mono text-[12px] font-medium"
+                                      {...props}
+                                    >
                                       {children}
                                     </code>
-                                  ) : (
-                                    <pre className="p-3 my-2 rounded-lg bg-campus-bg border border-campus-border overflow-x-auto text-xs font-mono text-zinc-200">
-                                      <code>{children}</code>
-                                    </pre>
-                                  ),
+                                  );
+                                },
+                                table: ({ children }) => (
+                                  <div className="my-3 overflow-x-auto rounded-xl border border-campus-border bg-campus-card/30 shadow-sm">
+                                    <table className="min-w-full divide-y divide-campus-border text-left text-xs">
+                                      {children}
+                                    </table>
+                                  </div>
+                                ),
+                                thead: ({ children }) => (
+                                  <thead className="bg-[#1b1c20] text-white border-b border-campus-border">{children}</thead>
+                                ),
+                                tbody: ({ children }) => (
+                                  <tbody className="divide-y divide-campus-border/50 text-xs bg-campus-card/20">{children}</tbody>
+                                ),
+                                tr: ({ children }) => (
+                                  <tr className="hover:bg-campus-card/50 transition-colors">{children}</tr>
+                                ),
+                                th: ({ children }) => (
+                                  <th className="px-3.5 py-2.5 font-semibold text-white tracking-wider text-left">{children}</th>
+                                ),
+                                td: ({ children }) => (
+                                  <td className="px-3.5 py-2 text-campus-subtext leading-relaxed whitespace-normal">{children}</td>
+                                ),
+                                blockquote: ({ children }) => (
+                                  <blockquote className="my-3 pl-3.5 border-l-2 border-blue-500 text-campus-muted italic bg-campus-bg/40 py-1.5 rounded-r-lg">
+                                    {children}
+                                  </blockquote>
+                                ),
+                                hr: () => <hr className="my-4 border-campus-border/70" />,
+                                a: ({ href, children }) => (
+                                  <a
+                                    href={href}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-blue-400 hover:text-blue-300 underline underline-offset-2 transition-colors font-medium inline-flex items-center gap-0.5"
+                                  >
+                                    {children}
+                                    <ExternalLink className="w-3 h-3 inline-block ml-0.5 opacity-70" />
+                                  </a>
+                                ),
                               }}
                             >
-                              {msg.text}
+                              {formatMarkdownContent(msg.text)}
                             </ReactMarkdown>
                           </div>
                         )}

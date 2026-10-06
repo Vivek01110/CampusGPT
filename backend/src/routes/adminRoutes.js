@@ -16,6 +16,42 @@ import {
   deleteDocument,
   getDocumentStatus,
 } from '../controllers/adminDocumentController.js';
+import {
+  getAdminCourses,
+  createAdminCourse,
+  getAdminCourseById,
+  updateAdminCourse,
+  deleteAdminCourse,
+} from '../controllers/adminCourseController.js';
+import {
+  getAdminEvents,
+  createAdminEvent,
+  getAdminEventById,
+  updateAdminEvent,
+  deleteAdminEvent,
+} from '../controllers/adminEventController.js';
+import {
+  getSources,
+  getSourceById,
+  createSource,
+  updateSource,
+  deleteSource,
+  runCrawl,
+  stopCrawl,
+  getCrawlJobs,
+  getCrawlJobById,
+} from '../controllers/adminCrawlerController.js';
+import {
+  getKnowledgeStats,
+  startFullPyqSync,
+  startIncrementalPyqSync,
+  stopPyqSync,
+  getPyqSyncStatus,
+  getPyqDocuments,
+  getPyqDocumentById,
+  reviewPyqDocument,
+  reprocessPyqDocument,
+} from '../controllers/adminKnowledgeController.js';
 
 const router = express.Router();
 
@@ -88,21 +124,6 @@ router.post('/documents/:id/retry', retryVersion);
 router.patch('/documents/:id/status', setDocumentStatus);
 router.delete('/documents/:id', deleteDocument);
 
-import {
-  getAdminCourses,
-  getAdminCourseById,
-  createAdminCourse,
-  updateAdminCourse,
-  deleteAdminCourse,
-} from '../controllers/adminCourseController.js';
-import {
-  getAdminEvents,
-  getAdminEventById,
-  createAdminEvent,
-  updateAdminEvent,
-  deleteAdminEvent,
-} from '../controllers/adminEventController.js';
-
 // --------------------------------------------------------------------------
 // STRUCTURED COURSE CATALOG MANAGEMENT (Phase 6)
 // --------------------------------------------------------------------------
@@ -121,17 +142,6 @@ router.get('/events/:id', getAdminEventById);
 router.patch('/events/:id', updateAdminEvent);
 router.delete('/events/:id', deleteAdminEvent);
 
-import {
-  getSources,
-  getSourceById,
-  createSource,
-  updateSource,
-  deleteSource,
-  runCrawl,
-  getCrawlJobs,
-  getCrawlJobById,
-} from '../controllers/adminCrawlerController.js';
-
 // --------------------------------------------------------------------------
 // NIT KKR WEBSITE CRAWLER & AUTOMATED INGESTION (Phase 7)
 // --------------------------------------------------------------------------
@@ -141,7 +151,21 @@ router.get('/crawler/sources/:id', getSourceById);
 router.patch('/crawler/sources/:id', updateSource);
 router.delete('/crawler/sources/:id', deleteSource);
 router.post('/crawler/sources/:id/run', runCrawl);
+router.post('/crawler/sources/:id/stop', stopCrawl);
 router.get('/crawler/jobs', getCrawlJobs);
 router.get('/crawler/jobs/:id', getCrawlJobById);
+
+// --------------------------------------------------------------------------
+// COMPLETE KNOWLEDGE INGESTION & PUBLIC PYQ DRIVE (Phase 8)
+// --------------------------------------------------------------------------
+router.get('/knowledge/stats', getKnowledgeStats);
+router.post('/pyq/sync', startFullPyqSync);
+router.post('/pyq/sync/incremental', startIncrementalPyqSync);
+router.post('/pyq/sync/stop', stopPyqSync);
+router.get('/pyq/sync/status', getPyqSyncStatus);
+router.get('/pyq/documents', getPyqDocuments);
+router.get('/pyq/documents/:id', getPyqDocumentById);
+router.post('/pyq/review/:id', reviewPyqDocument);
+router.post('/pyq/reprocess/:id', reprocessPyqDocument);
 
 export default router;

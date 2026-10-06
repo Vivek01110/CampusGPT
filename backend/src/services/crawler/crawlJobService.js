@@ -60,9 +60,7 @@ export const queueCrawlJob = async (sourceId, userId = null) => {
   // Asynchronous background execution (fire and forget from HTTP response perspective)
   setImmediate(async () => {
     try {
-      // Delete temporary pre-created queued record because executeCrawl creates and manages its own running job
-      await CrawlJob.findByIdAndDelete(initialJob._id);
-      await executeCrawl(sourceId, userId);
+      await executeCrawl(sourceId, userId, initialJob._id);
     } catch (err) {
       console.error(`[BACKGROUND CRAWL ERROR] Failed executing crawl for source ${sourceId}: ${err.message}`);
     }

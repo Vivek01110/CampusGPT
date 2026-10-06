@@ -4,6 +4,7 @@ import {
   Globe,
   Plus,
   Play,
+  Square,
   RefreshCw,
   Trash2,
   CheckCircle2,
@@ -116,6 +117,21 @@ const CrawlerManagement = () => {
     }
   };
 
+  // Handle Stop / Reset Crawl
+  const handleStopCrawl = async (source) => {
+    try {
+      await adminAPI.stopCrawlerSource(source._id);
+      setFeedback({
+        type: 'success',
+        message: `Crawl status for "${source.name}" reset successfully.`,
+      });
+      fetchSources();
+      fetchJobs();
+    } catch (err) {
+      setFeedback({ type: 'error', message: err.message || 'Failed to stop crawl job' });
+    }
+  };
+
   // Toggle Source Enabled
   const handleToggleEnable = async (source) => {
     try {
@@ -211,7 +227,7 @@ const CrawlerManagement = () => {
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" />
             <span className="text-xs font-mono font-medium px-2 py-0.5 rounded bg-blue-500/20 text-blue-300 border border-blue-500/30">
-              Phase 7 NIT KKR Public Website Crawler (Academic Year: 2025–26)
+              Official NIT KKR Public Website Crawler (Academic Year: 2025–26)
             </span>
           </div>
           <h2 className="text-xl font-bold text-white tracking-tight flex items-center gap-2">
@@ -247,11 +263,10 @@ const CrawlerManagement = () => {
 
       {feedback && (
         <div
-          className={`p-3 rounded-lg text-xs flex items-center justify-between gap-2 ${
-            feedback.type === 'success'
+          className={`p-3 rounded-lg text-xs flex items-center justify-between gap-2 ${feedback.type === 'success'
               ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300'
               : 'bg-red-500/10 border border-red-500/30 text-red-400'
-          }`}
+            }`}
         >
           <div className="flex items-center gap-2">
             {feedback.type === 'success' ? (
@@ -332,13 +347,12 @@ const CrawlerManagement = () => {
                       </td>
                       <td className="py-3.5 px-4">
                         <span
-                          className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase border ${
-                            src.priority === 'high'
+                          className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase border ${src.priority === 'high'
                               ? 'bg-rose-500/10 text-rose-300 border-rose-500/20'
                               : src.priority === 'medium'
-                              ? 'bg-amber-500/10 text-amber-300 border-amber-500/20'
-                              : 'bg-zinc-500/10 text-zinc-400 border-zinc-500/20'
-                          }`}
+                                ? 'bg-amber-500/10 text-amber-300 border-amber-500/20'
+                                : 'bg-zinc-500/10 text-zinc-400 border-zinc-500/20'
+                            }`}
                         >
                           {src.priority || 'high'}
                         </span>
@@ -355,11 +369,10 @@ const CrawlerManagement = () => {
                       <td className="py-3.5 px-4">
                         <button
                           onClick={() => handleToggleEnable(src)}
-                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-medium transition-colors ${
-                            src.enabled
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-medium transition-colors ${src.enabled
                               ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/20'
                               : 'bg-zinc-500/10 text-zinc-400 border border-zinc-500/30 hover:bg-zinc-500/20'
-                          }`}
+                            }`}
                         >
                           {src.enabled ? 'ENABLED' : 'DISABLED'}
                         </button>
@@ -369,13 +382,12 @@ const CrawlerManagement = () => {
                           <div>
                             <div>{new Date(src.lastCrawlAt).toLocaleDateString()}</div>
                             <span
-                              className={`text-[9px] uppercase font-bold ${
-                                src.lastCrawlStatus === 'completed'
+                              className={`text-[9px] uppercase font-bold ${src.lastCrawlStatus === 'completed'
                                   ? 'text-emerald-400'
                                   : src.lastCrawlStatus === 'running'
-                                  ? 'text-blue-400 animate-pulse'
-                                  : 'text-zinc-400'
-                              }`}
+                                    ? 'text-blue-400 animate-pulse'
+                                    : 'text-zinc-400'
+                                }`}
                             >
                               {src.lastCrawlStatus}
                             </span>
@@ -386,15 +398,26 @@ const CrawlerManagement = () => {
                       </td>
                       <td className="py-3.5 px-4 text-right">
                         <div className="flex items-center justify-end gap-1.5">
-                          <button
-                            onClick={() => handleRunCrawl(src)}
-                            disabled={!src.enabled || runningJobSourceId === src._id || src.lastCrawlStatus === 'running'}
-                            className="campus-btn-primary bg-blue-600 hover:bg-blue-500 shadow-blue-500/20 text-xs py-1 px-2.5 disabled:opacity-50"
-                            title="Run polite crawl now"
-                          >
-                            <Play className="w-3 h-3" />
-                            {src.lastCrawlStatus === 'running' ? 'Running...' : 'Run Crawl'}
-                          </button>
+                          {src.lastCrawlStatus === 'running' ? (
+                            <button
+                              onClick={() => handleStopCrawl(src)}
+                              className="campus-btn-secondary border-red-500/40 text-red-400 hover:bg-red-500/10 text-xs py-1 px-2.5 inline-flex items-center gap-1"
+                              title="Stop active crawl and reset status to idle/failed"
+                            >
+                              <Square className="w-3 h-3 text-red-400 fill-red-400" />
+                              Stop / Reset
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => handleRunCrawl(src)}
+                              disabled={!src.enabled || runningJobSourceId === src._id}
+                              className="campus-btn-primary bg-blue-600 hover:bg-blue-500 shadow-blue-500/20 text-xs py-1 px-2.5 disabled:opacity-50"
+                              title={!src.enabled ? 'Source is disabled. Click the DISABLED badge to enable it first.' : 'Run polite crawl now'}
+                            >
+                              <Play className="w-3 h-3" />
+                              Run Crawl
+                            </button>
+                          )}
                           <button
                             onClick={() => handleDeleteSource(src)}
                             className="p-1.5 rounded text-campus-muted hover:text-red-400 hover:bg-red-500/10 transition-colors"
@@ -463,15 +486,14 @@ const CrawlerManagement = () => {
                       <td className="py-3.5 px-4">
                         <div className="flex items-center gap-2">
                           <span
-                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono uppercase font-bold ${
-                              j.status === 'completed'
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono uppercase font-bold ${j.status === 'completed'
                                 ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
                                 : j.status === 'running'
-                                ? 'bg-blue-500/10 text-blue-400 border border-blue-500/30 animate-pulse'
-                                : j.status === 'queued'
-                                ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
-                                : 'bg-red-500/10 text-red-400 border border-red-500/30'
-                            }`}
+                                  ? 'bg-blue-500/10 text-blue-400 border border-blue-500/30 animate-pulse'
+                                  : j.status === 'queued'
+                                    ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
+                                    : 'bg-red-500/10 text-red-400 border border-red-500/30'
+                              }`}
                           >
                             {j.status}
                           </span>
@@ -658,7 +680,7 @@ const CrawlerManagement = () => {
                   <input
                     type="number"
                     min="1"
-                    max="100"
+                    max="1000"
                     value={sourceForm.maxPagesPerRun}
                     onChange={(e) => setSourceForm({ ...sourceForm, maxPagesPerRun: e.target.value })}
                     className="campus-input text-xs font-mono"
@@ -796,17 +818,16 @@ const CrawlerManagement = () => {
                           {new Date(log.timestamp).toLocaleTimeString()}
                         </span>
                         <span
-                          className={`text-[9px] uppercase px-1 rounded flex-shrink-0 font-bold ${
-                            log.level === 'error'
+                          className={`text-[9px] uppercase px-1 rounded flex-shrink-0 font-bold ${log.level === 'error'
                               ? 'bg-red-500/20 text-red-400'
                               : log.level === 'warn'
-                              ? 'bg-amber-500/20 text-amber-400'
-                              : log.level === 'info' && log.message.includes('ACCEPTED')
-                              ? 'bg-emerald-500/20 text-emerald-400'
-                              : log.level === 'info' && log.message.includes('SKIP')
-                              ? 'bg-amber-500/10 text-amber-300'
-                              : 'bg-campus-surface text-campus-subtext'
-                          }`}
+                                ? 'bg-amber-500/20 text-amber-400'
+                                : log.level === 'info' && log.message.includes('ACCEPTED')
+                                  ? 'bg-emerald-500/20 text-emerald-400'
+                                  : log.level === 'info' && log.message.includes('SKIP')
+                                    ? 'bg-amber-500/10 text-amber-300'
+                                    : 'bg-campus-surface text-campus-subtext'
+                            }`}
                         >
                           {log.level}
                         </span>
@@ -816,12 +837,12 @@ const CrawlerManagement = () => {
                               log.message.includes('ACCEPTED')
                                 ? 'text-emerald-300 font-semibold'
                                 : log.message.includes('exceeds maximum page limit')
-                                ? 'text-rose-400 font-semibold'
-                                : log.message.includes('OUTSIDE_TARGET_ACADEMIC_YEAR')
-                                ? 'text-amber-300'
-                                : log.message.includes('YEAR_UNKNOWN')
-                                ? 'text-zinc-400 italic'
-                                : 'text-campus-text'
+                                  ? 'text-rose-400 font-semibold'
+                                  : log.message.includes('OUTSIDE_TARGET_ACADEMIC_YEAR')
+                                    ? 'text-amber-300'
+                                    : log.message.includes('YEAR_UNKNOWN')
+                                      ? 'text-zinc-400 italic'
+                                      : 'text-campus-text'
                             }
                           >
                             {log.message}

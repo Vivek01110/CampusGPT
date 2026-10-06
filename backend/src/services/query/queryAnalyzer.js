@@ -26,6 +26,8 @@ import {
 const DEPARTMENT_MAP = {
   cse: 'Computer Science & Engineering',
   'computer science': 'Computer Science & Engineering',
+  'computer engineering': 'Computer Engineering',
+  computer: 'Computer Engineering',
   cs: 'Computer Science & Engineering',
   it: 'Information Technology',
   ece: 'Electronics & Communication Engineering',
@@ -203,8 +205,16 @@ export const analyzeQuery = (rawQuery = '') => {
     documentType = 'regulation';
   }
 
-  // 9. Year extraction (e.g. 2024, 2025, 2026)
-  const yearMatch = query.match(/\b(20[2-3][0-9])\b/);
+  // 9. Year and Year-Range extraction (e.g. 2017, 2024, or "from 2020 to 2025")
+  let startYear = null;
+  let endYear = null;
+  const yearRangeMatch = query.match(/\b(20\d{2}|19\d{2})\s*(?:to|-|till)\s*(20\d{2}|19\d{2})\b/i);
+  if (yearRangeMatch) {
+    startYear = parseInt(yearRangeMatch[1], 10);
+    endYear = parseInt(yearRangeMatch[2], 10);
+  }
+
+  const yearMatch = query.match(/\b(20\d{2}|19\d{2})\b/);
   if (yearMatch) {
     year = parseInt(yearMatch[1], 10);
   }
@@ -265,6 +275,20 @@ export const analyzeQuery = (rawQuery = '') => {
     intent = 'policy_question';
   }
 
+  // 14b. Source Type Preference
+  let sourceType = null;
+  const isPYQ =
+    /\b(previous year|past paper|pyq|pyqs|question paper|past year paper|old paper|exam paper)\b/i.test(lower) ||
+    documentType === 'previous_year_paper';
+
+  if (isPYQ) {
+    sourceType = 'student_drive';
+  } else if (
+    /\b(placement policy|official|syllabus|curriculum|exam schedule|academic calendar|ordinance|rules|regulations|notice|circular)\b/i.test(lower)
+  ) {
+    sourceType = 'official_nitkkr';
+  }
+
   // 15. Clean search query
   const cleanedSearchQuery = query
     .replace(
@@ -282,9 +306,12 @@ export const analyzeQuery = (rawQuery = '') => {
     examType,
     requestedFields,
     department,
+    branch: department,
     program,
     semester,
     year,
+    startYear,
+    endYear,
     academicYear,
     regulationNumber,
     courseCode,
@@ -292,6 +319,7 @@ export const analyzeQuery = (rawQuery = '') => {
     documentType,
     category,
     eventType,
+    sourceType,
     exactPhrases,
   };
 };

@@ -67,6 +67,9 @@ const documentSchema = new mongoose.Schema(
           'fee',
           'research',
           'recruitment',
+          'event',
+          'placement_notice',
+          'placement_policy',
           'other',
           'unknown',
         ],
@@ -99,13 +102,35 @@ const documentSchema = new mongoose.Schema(
     },
     sourceType: {
       type: String,
-      enum: ['upload', 'url', 'website'],
-      default: 'upload',
+      enum: ['official_nitkkr', 'student_drive', 'community', 'third_party', 'upload', 'url', 'website'],
+      default: 'official_nitkkr',
+      index: true,
+    },
+    sourceTrust: {
+      type: String,
+      enum: ['official', 'community', 'third_party'],
+      default: 'official',
+      index: true,
     },
     sourceAuthority: {
       type: String,
       enum: ['official', 'department', 'internal', 'user_uploaded'],
       default: 'official',
+    },
+    isCurrent: {
+      type: Boolean,
+      default: true,
+      index: true,
+    },
+    documentYear: {
+      type: Number,
+      default: null,
+      index: true,
+    },
+    webViewLink: {
+      type: String,
+      trim: true,
+      default: null,
     },
     year: {
       type: Number,
@@ -123,7 +148,7 @@ const documentSchema = new mongoose.Schema(
     },
     storagePath: {
       type: String,
-      required: true,
+      default: '',
     },
     fileSize: {
       type: Number,

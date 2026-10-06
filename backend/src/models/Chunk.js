@@ -41,10 +41,34 @@ const chunkSchema = new mongoose.Schema(
       type: String,
       default: 'official',
     },
+    sourceTrust: {
+      type: String,
+      default: 'official',
+      index: true,
+    },
     sourceType: {
       type: String,
       default: 'upload',
       index: true,
+    },
+    courseCode: {
+      type: String,
+      default: null,
+      index: true,
+    },
+    semester: {
+      type: Number,
+      default: null,
+      index: true,
+    },
+    branch: {
+      type: String,
+      default: null,
+      index: true,
+    },
+    questionNumber: {
+      type: Number,
+      default: null,
     },
     year: {
       type: Number,

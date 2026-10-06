@@ -3,6 +3,7 @@ import {
   registerUser,
   loginUser,
   getMe,
+  updateProfile,
   logoutUser,
   getAdminCheck,
 } from '../controllers/authController.js';
@@ -15,6 +16,7 @@ const router = express.Router();
 router.post('/register', authRateLimiter, registerUser);
 router.post('/login', authRateLimiter, loginUser);
 router.get('/me', protect, getMe);
+router.patch('/profile', protect, updateProfile);
 router.post('/logout', logoutUser);
 
 // Admin-only test/check endpoint

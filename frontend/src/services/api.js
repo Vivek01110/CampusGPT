@@ -354,6 +354,9 @@ export const adminAPI = {
   runCrawlerSource: (id) =>
     request(`/admin/crawler/sources/${id}/run`, { method: 'POST' }),
 
+  stopCrawlerSource: (id) =>
+    request(`/admin/crawler/sources/${id}/stop`, { method: 'POST' }),
+
   getCrawlJobs: (params = {}) => {
     const query = new URLSearchParams(params).toString();
     return request(`/admin/crawler/jobs${query ? `?${query}` : ''}`, { method: 'GET' });
@@ -361,6 +364,50 @@ export const adminAPI = {
 
   getCrawlJobById: (id) =>
     request(`/admin/crawler/jobs/${id}`, { method: 'GET' }),
+
+  // ----------------------------------------------------
+  // Knowledge Ingestion & PYQ Drive APIs (Phase 8)
+  // ----------------------------------------------------
+  getKnowledgeStats: () =>
+    request('/admin/knowledge/stats', { method: 'GET' }),
+
+  startFullPyqSync: (folderUrl = null) =>
+    request('/admin/pyq/sync', {
+      method: 'POST',
+      body: JSON.stringify({ folderUrl }),
+    }),
+
+  startIncrementalPyqSync: (folderUrl = null) =>
+    request('/admin/pyq/sync/incremental', {
+      method: 'POST',
+      body: JSON.stringify({ folderUrl }),
+    }),
+
+  stopPyqSync: (jobId = null) =>
+    request('/admin/pyq/sync/stop', {
+      method: 'POST',
+      body: JSON.stringify({ jobId }),
+    }),
+
+  getPyqSyncStatus: (jobId = null) =>
+    request(`/admin/pyq/sync/status${jobId ? `?jobId=${jobId}` : ''}`, { method: 'GET' }),
+
+  getPyqDocuments: (params = {}) => {
+    const query = new URLSearchParams(params).toString();
+    return request(`/admin/pyq/documents${query ? `?${query}` : ''}`, { method: 'GET' });
+  },
+
+  getPyqDocumentById: (id) =>
+    request(`/admin/pyq/documents/${id}`, { method: 'GET' }),
+
+  reviewPyqDocument: (id, data) =>
+    request(`/admin/pyq/review/${id}`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  reprocessPyqDocument: (id) =>
+    request(`/admin/pyq/reprocess/${id}`, { method: 'POST' }),
 };
 
 export const systemAPI = {

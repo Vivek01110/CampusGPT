@@ -18,7 +18,7 @@ const documentVersionSchema = new mongoose.Schema(
     },
     storagePath: {
       type: String,
-      required: true,
+      default: '',
     },
     sourceUrl: {
       type: String,

@@ -40,10 +40,44 @@ const userSchema = new mongoose.Schema(
       trim: true,
       default: 'Computer Science & Engineering',
     },
+    branch: {
+      type: String,
+      trim: true,
+      default: 'CSE',
+    },
+    program: {
+      type: String,
+      trim: true,
+      default: 'B.Tech',
+    },
+    degree: {
+      type: String,
+      trim: true,
+      default: 'B.Tech',
+    },
+    semester: {
+      type: Number,
+      default: null,
+    },
     year: {
       type: String,
       trim: true,
       default: '1st Year',
+    },
+    batch: {
+      type: String,
+      trim: true,
+      default: null,
+    },
+    academicYear: {
+      type: String,
+      trim: true,
+      default: '2025-26',
+    },
+    campus: {
+      type: String,
+      trim: true,
+      default: 'NIT Kurukshetra',
     },
   },
   {

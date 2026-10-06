@@ -43,8 +43,9 @@ export const registerUser = async (req, res, next) => {
       });
     }
 
-    // Validate role if specified
-    const assignedRole = role === 'admin' ? 'admin' : 'student';
+    // Validate role: only vivekadmin@gmail.com is allowed admin privileges
+    const normalizedEmail = email.toLowerCase().trim();
+    const assignedRole = (role === 'admin' && normalizedEmail === 'vivekadmin@gmail.com') ? 'admin' : 'student';
 
     // Create user
     const user = await User.create({
@@ -146,6 +147,46 @@ export const getMe = async (req, res, next) => {
       message: 'User profile retrieved successfully.',
       data: {
         user: safeUser,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Update authenticated user profile
+ * @route   PATCH /api/auth/profile
+ * @access  Private
+ */
+export const updateProfile = async (req, res, next) => {
+  try {
+    const allowedFields = [
+      'name',
+      'department',
+      'branch',
+      'program',
+      'degree',
+      'semester',
+      'year',
+      'batch',
+      'academicYear',
+      'campus',
+    ];
+
+    const updates = {};
+    for (const field of allowedFields) {
+      if (req.body[field] !== undefined) {
+        updates[field] = req.body[field];
+      }
+    }
+
+    const updatedUser = await User.findByIdAndUpdate(req.user._id, { $set: updates }, { new: true });
+    return res.status(200).json({
+      success: true,
+      message: 'Profile updated successfully.',
+      data: {
+        user: updatedUser.toSafeObject(),
       },
     });
   } catch (error) {

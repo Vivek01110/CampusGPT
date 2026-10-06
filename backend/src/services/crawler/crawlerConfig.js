@@ -3,6 +3,9 @@
  */
 
 export const CRAWLER_CONFIG = {
+  // Official Base URL (Configurable via environment variable)
+  NIT_KKR_BASE_URL: process.env.NIT_KKR_BASE_URL || 'https://nitkkr.ac.in/',
+
   // Target Academic Year Scope
   TARGET_ACADEMIC_YEAR: process.env.TARGET_ACADEMIC_YEAR || '2025-26',
   ACADEMIC_YEAR_BOUNDARIES: {
@@ -14,11 +17,15 @@ export const CRAWLER_CONFIG = {
   DEFAULT_REQUEST_DELAY_MS: 1000,
   MIN_REQUEST_DELAY_MS: 200,
   MAX_REQUEST_DELAY_MS: 10000,
-  DEFAULT_MAX_PAGES_PER_RUN: 25,
-  MAX_ALLOWED_PAGES_PER_RUN: 100,
+  DEFAULT_MAX_PAGES_PER_RUN: 50,
+  MAX_ALLOWED_PAGES_PER_RUN: 1000,
   REQUEST_TIMEOUT_MS: 15000,
   MAX_RETRIES: 2,
   INITIAL_RETRY_DELAY_MS: 1500,
+
+  // HTML Content Ingestion
+  INGEST_HTML_CONTENT: true,
+  MIN_HTML_TEXT_LENGTH: 150, // Minimum characters required to index an HTML page
 
   // Resource Size Limits (Protection against oversized responses)
   MAX_HTML_SIZE_BYTES: 5 * 1024 * 1024, // 5 MB
@@ -52,6 +59,13 @@ export const CRAWLER_CONFIG = {
     '/b-tech/',
     '/dasa-mea-iccr-iis/',
     '/notification-archived/',
+    '/training-and-placement/',
+    '/placement-policies/',
+    '/syllabus/',
+    '/scheme-and-syllabi/',
+    '/hostels/',
+    '/rules-and-regulations/',
+    '/events/',
   ],
 
   // Allowed PDF Destination Prefix (Only downloaded when linked from approved HTML pages)

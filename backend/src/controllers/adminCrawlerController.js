@@ -2,6 +2,8 @@ import WebsiteSource from '../models/WebsiteSource.js';
 import { queueCrawlJob, getCrawlJobs as serviceGetJobs, getCrawlJobById as serviceGetJobById, seedDefaultSources } from '../services/crawler/crawlJobService.js';
 import { normalizeUrl } from '../services/crawler/urlNormalizer.js';
 
+import CrawlJob from '../models/CrawlJob.js';
+
 /**
  * @desc    Get all configured website sources
  * @route   GET /api/admin/crawler/sources
@@ -11,6 +13,44 @@ export const getSources = async (req, res, next) => {
   try {
     // Seed default source if empty
     await seedDefaultSources(req.user?._id);
+
+    // Auto-reconcile stale "running" sources and jobs if inactive/stuck > 10 mins
+    try {
+      const staleThreshold = new Date(Date.now() - 10 * 60 * 1000);
+      const staleJobs = await CrawlJob.find({
+        status: { $in: ['running', 'queued'] },
+        updatedAt: { $lt: staleThreshold },
+      });
+
+      if (staleJobs.length > 0) {
+        const staleJobIds = staleJobs.map((j) => j._id);
+        const staleSourceIds = staleJobs.map((j) => j.websiteSourceId);
+
+        await CrawlJob.updateMany(
+          { _id: { $in: staleJobIds } },
+          { $set: { status: 'failed', error: 'Crawl stopped or timed out due to server restart.' } }
+        );
+
+        await WebsiteSource.updateMany(
+          { _id: { $in: staleSourceIds } },
+          { $set: { lastCrawlStatus: 'failed' } }
+        );
+      }
+
+      // Also reset any source marked 'running' if it has no active running job
+      const activeRunningJobs = await CrawlJob.find({ status: { $in: ['running', 'queued'] } });
+      const activeRunningSourceIds = new Set(activeRunningJobs.map((j) => j.websiteSourceId.toString()));
+      const orphanedRunningSources = await WebsiteSource.find({ lastCrawlStatus: 'running' });
+
+      for (const src of orphanedRunningSources) {
+        if (!activeRunningSourceIds.has(src._id.toString())) {
+          src.lastCrawlStatus = 'failed';
+          await src.save();
+        }
+      }
+    } catch (recErr) {
+      console.warn('[CRAWL AUTO-RECONCILE WARNING]', recErr.message);
+    }
 
     const sources = await WebsiteSource.find()
       .populate('createdBy', 'name email')
@@ -199,6 +239,37 @@ export const runCrawl = async (req, res, next) => {
 };
 
 /**
+ * @desc    Force stop running crawl job for a source or all sources
+ * @route   POST /api/admin/crawler/sources/:id/stop
+ * @access  Private (Admin only)
+ */
+export const stopCrawl = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const source = await WebsiteSource.findById(id);
+    if (!source) {
+      return res.status(404).json({ success: false, message: 'Source not found' });
+    }
+
+    await CrawlJob.updateMany(
+      { websiteSourceId: source._id, status: { $in: ['running', 'queued'] } },
+      { $set: { status: 'stopped', error: 'Stopped manually by administrator' } }
+    );
+
+    source.lastCrawlStatus = 'failed';
+    await source.save();
+
+    return res.status(200).json({
+      success: true,
+      message: `Crawl for "${source.name}" stopped and status reset.`,
+      data: { source },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
  * @desc    Get paginated crawl jobs history
  * @route   GET /api/admin/crawler/jobs
  * @access  Private (Admin only)
@@ -241,6 +312,7 @@ export default {
   updateSource,
   deleteSource,
   runCrawl,
+  stopCrawl,
   getCrawlJobs,
   getCrawlJobById,
 };

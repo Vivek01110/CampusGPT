@@ -9,6 +9,20 @@ import { searchPoints } from '../vector/qdrantService.js';
 export const buildQdrantFilter = (filterOptions = {}) => {
   const must = [];
 
+  if (filterOptions.sourceType) {
+    must.push({
+      key: 'sourceType',
+      match: { value: filterOptions.sourceType },
+    });
+  }
+
+  if (filterOptions.courseCode) {
+    must.push({
+      key: 'courseCode',
+      match: { value: filterOptions.courseCode.toUpperCase() },
+    });
+  }
+
   if (filterOptions.category) {
     must.push({
       key: 'category',
@@ -94,8 +108,15 @@ export const retrieveVectorCandidates = async (query, options = {}) => {
     const activeHits = hits.filter((h) => {
       if (options.includeInactive === true) return true;
       if (h.payload?.isActive === false) return false;
-      // Phase 7: For automated website-crawled documents, strictly restrict to 2025-26
-      if (h.payload?.sourceType === 'website' && h.payload?.academicYear && h.payload?.academicYear !== '2025-26') {
+      // Phase 7: For automated website-crawled documents, restrict to current year unless specific year requested
+      if (
+        h.payload?.sourceType === 'website' &&
+        !options.year &&
+        !options.filters?.year &&
+        !options.academicYear &&
+        h.payload?.academicYear &&
+        h.payload?.academicYear !== '2025-26'
+      ) {
         return false;
       }
       // Phase 7: Exclude non-student scopes from default student RAG if specified

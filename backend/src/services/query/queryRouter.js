@@ -1,11 +1,15 @@
 import { analyzeQuery } from './queryAnalyzer.js';
 import { classifyIntent, INTENTS } from './intentClassifier.js';
+import { understandQuery } from './queryUnderstandingService.js';
+import { resolveUserContext, detectProfileUpdateRequest } from './userContextService.js';
 import courseService from '../courses/courseService.js';
 import academicEventService from '../events/academicEventService.js';
 import documentSearchService from '../documents/documentSearchService.js';
 import { answerQuestion } from '../rag/ragService.js';
 import { retrieveHybridContext } from '../retrieval/hybridRetriever.js';
-import { generateAnswer } from '../ai/llmService.js';
+import { generateAnswer, generateGeneralAnswer } from '../ai/llmService.js';
+import User from '../../models/User.js';
+import ChatMessage from '../../models/ChatMessage.js';
 
 /**
  * Format structured course results into a clean, human-readable student response
@@ -72,15 +76,65 @@ const formatEventsResponse = (events, query) => {
 /**
  * Format document discovery results (e.g. Previous Year Papers or Notices)
  */
+/**
+ * Format specialized PYQ search response matching exact prompt guidelines
+ */
+const formatPyqSearchResponse = (docs, query, analysis) => {
+  if (!docs || docs.length === 0) return null;
+
+  if (docs.length === 1) {
+    const doc = docs[0];
+    const courseTitle =
+      doc.courseName && doc.courseCode
+        ? `${doc.courseName} (${doc.courseCode})`
+        : doc.courseName || doc.title;
+    const branchText = doc.branch ? `B.Tech ${doc.branch}` : doc.program || 'B.Tech';
+    const semText = doc.semester ? `Semester ${doc.semester}` : '';
+    const dateText = [doc.examMonth, doc.year].filter(Boolean).join(' ');
+
+    let res = `### **${courseTitle}**\n`;
+    if (branchText || semText) {
+      res += `${[branchText, semText].filter(Boolean).join(' — ')}\n`;
+    }
+    if (dateText) {
+      res += `${dateText}\n\n`;
+    } else {
+      res += `\n`;
+    }
+    if (doc.sourceUrl) {
+      res += `📄 **[View Original PDF](${doc.sourceUrl})**\n\n`;
+    }
+    res += `*Source: NIT KKR PYQ Drive*`;
+    return res;
+  }
+
+  // Multiple papers found
+  let res = `Found ${docs.length} question paper(s) matching your request from the **NIT KKR PYQ Drive**:\n\n`;
+  docs.forEach((doc, idx) => {
+    const courseTitle =
+      doc.courseName && doc.courseCode
+        ? `${doc.courseName} (${doc.courseCode})`
+        : doc.title;
+    const yearText = doc.year ? ` — ${doc.year}` : '';
+    const semText = doc.semester ? ` (Semester ${doc.semester})` : '';
+
+    res += `${idx + 1}. **${courseTitle}${yearText}**${semText}\n`;
+    if (doc.sourceUrl) {
+      res += `   🔗 [View Original PDF](${doc.sourceUrl})\n`;
+    }
+    res += `\n`;
+  });
+
+  res += `*Source: NIT KKR PYQ Drive*`;
+  return res.trim();
+};
+
 const formatDocumentSearchResponse = (docs, query, analysis) => {
   if (!docs || docs.length === 0) {
     return null;
   }
 
-  const isPYQ = analysis.documentType === 'previous_year_paper' || analysis.documentType === 'question_paper';
-  const label = isPYQ ? 'Previous-Year Examination Question Papers' : 'Official University Documents';
-
-  let text = `Found ${docs.length} verified ${label.toLowerCase()} matching your request:\n\n`;
+  let text = `Found ${docs.length} verified official university document(s) matching your request:\n\n`;
 
   docs.forEach((doc, idx) => {
     text += `### ${idx + 1}. 📄 **${doc.title}**\n`;
@@ -124,27 +178,107 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
 
   const query = rawQuery.trim();
 
-  // 1. Analyze domain signals & classify intent
-  const analysis = analyzeQuery(query);
-  const classification = classifyIntent(analysis);
+  // --------------------------------------------------------------------------
+  // STEP 1: Check for Explicit User Profile Update Requests
+  // e.g., "I'm now in 6th semester", "Remember that I'm a B.Tech CSE student"
+  // --------------------------------------------------------------------------
+  const profileUpdate = detectProfileUpdateRequest(query);
+  if (profileUpdate) {
+    if (user && user._id) {
+      try {
+        await User.findByIdAndUpdate(user._id, { $set: profileUpdate });
+        Object.assign(user, profileUpdate);
+        const updatedSummary = Object.entries(profileUpdate)
+          .map(([k, v]) => `• **${k}**: ${v}`)
+          .join('\n');
 
-  console.log(`[QUERY ROUTER] Query: "${query.slice(0, 50)}..." -> Intent: ${classification.intent}, Strategy: ${classification.queryType}`);
+        return {
+          answer: `✅ **Profile Updated Successfully!**\n\nI have updated your student profile with:\n${updatedSummary}\n\nI will automatically use this information for future course, PYQ, and semester queries without asking again. How can I assist you next?`,
+          queryType: 'profile_update',
+          intent: 'PROFILE_UPDATE',
+          sources: [],
+          structuredData: { profileUpdate },
+          clarification: null,
+          retrieval: { strategy: 'profile_update', cached: false },
+        };
+      } catch (err) {
+        console.warn(`[Profile Update] Failed to save update: ${err.message}`);
+      }
+    } else {
+      const updatedSummary = Object.entries(profileUpdate)
+        .map(([k, v]) => `• **${k}**: ${v}`)
+        .join('\n');
+      return {
+        answer: `I have noted your information for this session:\n${updatedSummary}\n\n*(Log in to save this permanently to your profile)*. How can I assist you today?`,
+        queryType: 'profile_update',
+        intent: 'PROFILE_UPDATE',
+        sources: [],
+        structuredData: { profileUpdate },
+        clarification: null,
+        retrieval: { strategy: 'session_context', cached: false },
+      };
+    }
+  }
 
   // --------------------------------------------------------------------------
-  // STRATEGY 0: General Conversational Chat & Greetings
+  // STEP 2: Load Recent Conversation Memory
   // --------------------------------------------------------------------------
-  if (classification.queryType === 'chat' || classification.intent === INTENTS.GENERAL_CHAT) {
-    let chatAnswer = "Hello! I'm AskCampusAi, your official university campus assistant. How can I help you with courses, exams, campus regulations, or academic notices today?";
+  let recentHistory = options.conversationHistory || [];
+  if ((!recentHistory || recentHistory.length === 0) && user && user._id) {
+    try {
+      const msgs = await ChatMessage.find({ userId: user._id })
+        .sort({ createdAt: -1 })
+        .limit(6);
+      recentHistory = msgs.reverse();
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // STEP 3: Dynamic Query Understanding Layer (Gemini-driven)
+  // --------------------------------------------------------------------------
+  const userContextSnapshot = user ? {
+    degree: user.degree || user.program || 'B.Tech',
+    program: user.program || user.degree || 'B.Tech',
+    branch: user.branch || user.department,
+    department: user.department,
+    semester: user.semester,
+    year: user.year,
+    campus: user.campus || 'NIT Kurukshetra',
+  } : {};
+
+  const understanding = await understandQuery(query, userContextSnapshot);
+
+  // --------------------------------------------------------------------------
+  // STEP 4: Strict Context Precedence Resolution
+  // Current Query Explicit > Stored User Profile > Recent Conversation > Unknown
+  // --------------------------------------------------------------------------
+  const { resolvedEntities, entitySources } = resolveUserContext(
+    understanding.entities || {},
+    user,
+    recentHistory
+  );
+
+  console.log(`[QUERY ROUTER] Query: "${query.slice(0, 50)}..." -> Dynamic Intent: ${understanding.intent}, Type: ${understanding.queryType}`);
+  console.log(`[QUERY ROUTER] Resolved Entities:`, JSON.stringify(resolvedEntities), `Sources:`, JSON.stringify(entitySources));
+
+  // --------------------------------------------------------------------------
+  // ROUTE 0: Conversational Chat & Greetings
+  // --------------------------------------------------------------------------
+  if (understanding.queryType === 'chat' || understanding.intent === 'GREETING' || /^(hi|hello|hey|good morning|thanks|thank you)\b/i.test(query)) {
+    let chatAnswer = "Hello! I'm CampusGPT, your official NIT Kurukshetra campus assistant. How can I help you with courses, exams, campus regulations, or previous year papers today?";
     const lowerQuery = query.toLowerCase();
     if (/thank/i.test(lowerQuery)) {
-      chatAnswer = "You're welcome! Feel free to ask if you have any questions about campus regulations, exam dates, or courses.";
+      chatAnswer = "You're welcome! Let me know if you need any other official regulations, syllabus details, or question papers.";
     } else if (/who are you|what can you do|what are you/i.test(lowerQuery)) {
-      chatAnswer = "I'm AskCampusAi, an AI assistant for university students. I can help you find verified information about academic ordinances, attendance rules, examination schedules, previous year question papers, hostel regulations, and official notices.";
+      chatAnswer = "I'm CampusGPT, an intelligent assistant for NIT Kurukshetra. I can help you with official academic ordinances, attendance regulations, examination schedules, previous year question papers (PYQs), placement policies, and syllabus details.";
     }
+
     return {
       answer: chatAnswer,
       queryType: 'chat',
-      intent: INTENTS.GENERAL_CHAT,
+      intent: 'GENERAL_CHAT',
       coverage: 'FULL',
       sources: [],
       structuredData: null,
@@ -154,32 +288,187 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
   }
 
   // --------------------------------------------------------------------------
-  // STRATEGY 1: Clarification
+  // ROUTE 1: Pure General Knowledge / Programming Queries (Direct Gemini Knowledge)
+  // E.g., "Explain binary search", "What is PCA?", "Explain TCP vs UDP", "Who won the World Cup?"
   // --------------------------------------------------------------------------
-  if (classification.queryType === 'clarification') {
+  if (understanding.queryType === 'general') {
+    console.log(`[QUERY ROUTER] Routing to Gemini General Knowledge (no campus RAG): "${query}"`);
+    const generalAnswer = await generateGeneralAnswer(query);
+
     return {
-      answer: `${classification.clarification.question}\n\n` +
-        classification.clarification.options.map((opt, i) => `${i + 1}. ${opt}`).join('\n') +
-        `\n\nPlease select an option or specify your request so I can give you the exact official information.`,
-      queryType: 'clarification',
-      intent: classification.intent,
-      coverage: 'CLARIFICATION',
+      answer: generalAnswer,
+      queryType: 'general',
+      intent: understanding.intent || 'GENERAL_KNOWLEDGE',
+      coverage: 'FULL',
       sources: [],
       structuredData: null,
-      clarification: classification.clarification,
-      retrieval: { strategy: 'clarification_response', cached: false },
+      clarification: null,
+      retrieval: { strategy: 'gemini_general_knowledge', cached: false },
     };
   }
 
   // --------------------------------------------------------------------------
-  // STRATEGY 2: Structured Course Search
+  // ROUTE 2: Hybrid Questions (General Concept + NIT Kurukshetra Information)
+  // E.g., "Explain DBMS and tell me which DBMS course is offered at NIT Kurukshetra."
   // --------------------------------------------------------------------------
-  if (classification.queryType === 'structured' && classification.intent === INTENTS.COURSE_SEARCH) {
-    const courseSearchTerm = analysis.subject || analysis.courseCode || analysis.searchQuery;
+  if (understanding.queryType === 'hybrid') {
+    console.log(`[QUERY ROUTER] Routing to Hybrid Pipeline (General Concept + NIT Kurukshetra RAG)...`);
+    const generalPart = understanding.hybridSplit?.generalPart || query;
+    const institutePart = understanding.hybridSplit?.institutePart || query;
+
+    // 1. Conceptual answer from Gemini
+    const generalAnswer = await generateGeneralAnswer(generalPart);
+
+    // 2. Institute specific check: course search or RAG
+    let instituteAnswer = '';
+    let instituteSources = [];
+
+    const courseSearchTerm = resolvedEntities.subject || resolvedEntities.courseCode;
+    if (courseSearchTerm) {
+      const courses = await courseService.searchCourses(courseSearchTerm, {
+        department: resolvedEntities.department || resolvedEntities.branch,
+        semester: resolvedEntities.semester,
+      });
+      if (courses && courses.length > 0) {
+        instituteAnswer = formatCoursesResponse(courses, institutePart);
+      }
+    }
+
+    if (!instituteAnswer) {
+      const ragResult = await answerQuestion(institutePart, {
+        ...options,
+        user,
+        rewrittenQuery: understanding.rewrittenQuery,
+        expandedTerms: understanding.expandedTerms,
+      });
+      instituteAnswer = ragResult.answer;
+      instituteSources = ragResult.sources || [];
+    }
+
+    const combinedAnswer = `### Conceptual Overview\n\n${generalAnswer}\n\n---\n\n### At NIT Kurukshetra\n\n${instituteAnswer}`;
+
+    return {
+      answer: combinedAnswer,
+      queryType: 'hybrid',
+      intent: understanding.intent || 'HYBRID_INQUIRY',
+      coverage: 'FULL',
+      sources: instituteSources,
+      structuredData: null,
+      clarification: null,
+      retrieval: { strategy: 'hybrid_general_and_rag', cached: false },
+    };
+  }
+
+  // --------------------------------------------------------------------------
+  // ROUTE 3: Dynamic Clarification System
+  // Clarify ONLY when essential information is genuinely missing and NOT present
+  // in user profile or conversation memory.
+  // --------------------------------------------------------------------------
+  const isPYQQuery = understanding.intent === 'PYQ_SEARCH' || /pyq|previous year|question paper/i.test(query);
+  const isMissingSubjectForPYQ = isPYQQuery && !resolvedEntities.subject;
+
+  if (understanding.needsClarification && (isMissingSubjectForPYQ || (understanding.missingInformation?.length > 0 && !resolvedEntities.semester && !resolvedEntities.branch && !resolvedEntities.subject))) {
+    const questionText = understanding.clarificationQuestion ||
+      (isPYQQuery
+        ? "Which subject's previous-year questions do you need? For example: DBMS, Operating Systems, Computer Networks, or Data Structures."
+        : "Could you please specify your semester or programme so I can retrieve the exact official document?");
+
+    return {
+      answer: `${questionText}\n\nPlease specify your request so I can give you the exact official documents.`,
+      queryType: 'clarification',
+      intent: understanding.intent,
+      coverage: 'CLARIFICATION',
+      sources: [],
+      structuredData: null,
+      clarification: {
+        needed: true,
+        question: questionText,
+        missingFields: understanding.missingInformation || [],
+        resolvedEntities,
+      },
+      retrieval: { strategy: 'dynamic_clarification', cached: false },
+    };
+  }
+
+  // --------------------------------------------------------------------------
+  // ROUTE 4: Document Discovery & PYQ Search (Integrated Knowledge Source)
+  // --------------------------------------------------------------------------
+  if (isPYQQuery || understanding.entities?.documentType === 'question_paper') {
+    const searchTerm = resolvedEntities.subject || query;
+    const examYear = (typeof resolvedEntities.year === 'number' && resolvedEntities.year > 1900)
+      ? resolvedEntities.year
+      : null;
+
+    const docs = await documentSearchService.searchDocuments(searchTerm, {
+      documentType: 'previous_year_paper',
+      sourceType: 'student_drive',
+      branch: resolvedEntities.branch,
+      department: resolvedEntities.department || resolvedEntities.branch,
+      semester: resolvedEntities.semester,
+      year: examYear,
+      courseCode: resolvedEntities.courseCode,
+      subject: resolvedEntities.subject,
+    });
+
+    if (docs && docs.length > 0) {
+      const formattedDocs = formatPyqSearchResponse(docs, query, resolvedEntities);
+      const sources = docs.map((d) => ({
+        documentId: d.documentId,
+        title: d.title,
+        category: 'examinations',
+        department: d.department || d.branch || 'General',
+        documentType: 'previous_year_paper',
+        sourceType: 'student_drive',
+        sourceAuthority: 'community',
+        sourceTrust: 'community',
+        sourceName: 'NIT KKR PYQ Drive',
+        year: d.year,
+        sourceUrl: d.sourceUrl || d.webViewLink,
+        pageDisplay: 'Original PDF',
+      }));
+
+      return {
+        answer: formattedDocs,
+        queryType: 'document_search',
+        intent: 'PYQ_SEARCH',
+        sources,
+        structuredData: { documents: docs },
+        clarification: null,
+        retrieval: { strategy: 'pyq_metadata_search', cached: false },
+      };
+    }
+
+    // Fallback: search indexed chunks with PYQ filters
+    console.log('[QUERY ROUTER] No PYQ document metadata matches. Falling back to hybrid RAG...');
+    const ragFallback = await answerQuestion(query, {
+      ...options,
+      user,
+      rewrittenQuery: understanding.rewrittenQuery,
+      expandedTerms: understanding.expandedTerms,
+      filters: { sourceType: 'student_drive' },
+    });
+
+    return {
+      ...ragFallback,
+      queryType: 'document_search',
+      intent: 'PYQ_SEARCH',
+      clarification: null,
+      retrieval: {
+        strategy: 'pyq_rag_fallback',
+        cached: ragFallback.cache?.hit || false,
+      },
+    };
+  }
+
+  // --------------------------------------------------------------------------
+  // ROUTE 5: Structured Course Catalog Search
+  // --------------------------------------------------------------------------
+  if (understanding.intent === 'COURSE_CATALOG' || understanding.intent === 'COURSE_SEARCH') {
+    const courseSearchTerm = resolvedEntities.subject || resolvedEntities.courseCode || query;
     const courses = await courseService.searchCourses(courseSearchTerm, {
-      department: analysis.department,
-      program: analysis.program,
-      semester: analysis.semester,
+      department: resolvedEntities.department || resolvedEntities.branch,
+      program: resolvedEntities.program || resolvedEntities.degree,
+      semester: resolvedEntities.semester,
     });
 
     if (courses && courses.length > 0) {
@@ -187,214 +476,33 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
       return {
         answer: formattedText,
         queryType: 'structured',
-        intent: classification.intent,
+        intent: understanding.intent,
         sources: [],
         structuredData: { courses },
         clarification: null,
         retrieval: { strategy: 'structured_database_search', cached: false },
       };
     }
-
-    // Fallback: If no structured database records found, run hybrid RAG to search course syllabi/handbooks
-    console.log('[QUERY ROUTER] No structured courses found in DB. Falling back to syllabus/policy RAG...');
-    const ragFallback = await answerQuestion(query, { ...options, user });
-    return {
-      ...ragFallback,
-      queryType: 'rag',
-      intent: classification.intent,
-      clarification: null,
-      retrieval: {
-        strategy: 'rag_fallback',
-        cached: ragFallback.cache?.hit || false,
-      },
-    };
   }
 
   // --------------------------------------------------------------------------
-  // STRATEGY 3: Structured Academic Deadlines & Dates
+  // ROUTE 6: Official NIT Kurukshetra Policy & Regulation RAG (Default Pipeline)
+  // Used for: attendance regulations, exam ordinances, placement policies,
+  // scholarships, fee structures, hostel rules, etc.
   // --------------------------------------------------------------------------
-  if (classification.queryType === 'structured' && classification.intent === INTENTS.DEADLINE_INQUIRY) {
-    const events = await academicEventService.searchEvents(analysis.searchQuery, {
-      eventType: analysis.eventType,
-      program: analysis.program,
-      department: analysis.department,
-      upcomingOnly: false,
-    });
+  console.log(`[QUERY ROUTER] Executing Official Campus RAG pipeline for: "${query}"...`);
+  const ragResult = await answerQuestion(query, {
+    ...options,
+    user,
+    rewrittenQuery: understanding.rewrittenQuery,
+    expandedTerms: understanding.expandedTerms,
+    resolvedEntities,
+  });
 
-    if (events && events.length > 0) {
-      const formattedDeadlines = formatEventsResponse(events, query);
-      return {
-        answer: formattedDeadlines,
-        queryType: 'structured',
-        intent: classification.intent,
-        sources: [],
-        structuredData: { events },
-        clarification: null,
-        retrieval: { strategy: 'structured_database_search', cached: false },
-      };
-    }
-
-    // Fallback: search academic calendar document via RAG
-    console.log('[QUERY ROUTER] No structured events found in DB. Falling back to academic calendar RAG...');
-    const ragFallback = await answerQuestion(query, { ...options, user });
-    return {
-      ...ragFallback,
-      queryType: 'rag',
-      intent: classification.intent,
-      clarification: null,
-      retrieval: {
-        strategy: 'rag_fallback',
-        cached: ragFallback.cache?.hit || false,
-      },
-    };
-  }
-
-  // --------------------------------------------------------------------------
-  // STRATEGY 4: Document Discovery & PYQ Search
-  // --------------------------------------------------------------------------
-  if (classification.queryType === 'document_search') {
-    const docs = await documentSearchService.searchDocuments(analysis.searchQuery, {
-      documentType: analysis.documentType,
-      department: analysis.department,
-      year: analysis.year,
-      courseCode: analysis.courseCode,
-      subject: analysis.subject,
-    });
-
-    if (docs && docs.length > 0) {
-      const formattedDocs = formatDocumentSearchResponse(docs, query, analysis);
-      const sources = docs.map((d) => ({
-        documentId: d.documentId,
-        title: d.title,
-        category: d.category,
-        department: d.department,
-        documentType: d.documentType,
-        year: d.year,
-        sourceUrl: d.sourceUrl,
-        sourceAuthority: d.sourceAuthority,
-        pageDisplay: `${d.totalPages} pages`,
-      }));
-
-      return {
-        answer: formattedDocs,
-        queryType: 'document_search',
-        intent: classification.intent,
-        sources,
-        structuredData: { documents: docs },
-        clarification: null,
-        retrieval: { strategy: 'metadata_document_search', cached: false },
-      };
-    }
-
-    // If no document registry metadata matches, search text in RAG
-    console.log('[QUERY ROUTER] No documents matched metadata search. Falling back to hybrid RAG...');
-    const ragFallback = await answerQuestion(query, { ...options, user });
-    return {
-      ...ragFallback,
-      queryType: 'rag',
-      intent: classification.intent,
-      clarification: null,
-      retrieval: {
-        strategy: 'rag_fallback',
-        cached: ragFallback.cache?.hit || false,
-      },
-    };
-  }
-
-  // --------------------------------------------------------------------------
-  // STRATEGY 5: Hybrid Question Handling (Structured Facts + Policy Regulations)
-  // --------------------------------------------------------------------------
-  if (classification.queryType === 'hybrid') {
-    // 1. Fetch relevant structured course / event info
-    const [courses, events] = await Promise.all([
-      courseService.searchCourses(analysis.subject || analysis.courseCode || analysis.searchQuery, {
-        department: analysis.department,
-        program: analysis.program,
-        semester: analysis.semester,
-      }),
-      academicEventService.searchEvents(analysis.searchQuery, {
-        program: analysis.program,
-        department: analysis.department,
-      }),
-    ]);
-
-    // 2. Fetch grounded policy regulations via Phase 3 Hybrid RAG
-    const ragContext = await retrieveHybridContext(query, {
-      topK: 6,
-      filters: {
-        category: analysis.category || 'academics',
-        department: analysis.department,
-      },
-    });
-
-    const contextItems = [
-      ...courses.map(c => ({
-        documentTitle: `Course Catalog: ${c.code} (${c.name})`,
-        pageNumber: c.semester ? `Semester ${c.semester}` : 'Catalog',
-        text: `[STRUCTURED COURSE DATABASE RECORD]\nCourse Code: ${c.code}\nCourse Name: ${c.name}\nDepartment: ${c.department}\nProgram: ${c.program || 'B.Tech'}\nSemester: ${c.semester}\nCredits: ${c.credits} (${c.type.toUpperCase()})\nPrerequisites: ${(c.prerequisites || []).join(', ') || 'None'}\nDescription: ${c.description || 'N/A'}`,
-      })),
-      ...events.map(e => ({
-        documentTitle: `Academic Calendar: ${e.title}`,
-        pageNumber: 'Calendar',
-        text: `[ACADEMIC CALENDAR EVENT / DEADLINE]\nTitle: ${e.title}\nCategory: ${e.eventType.toUpperCase()}\nRegistration Deadline: ${e.registrationDeadline ? new Date(e.registrationDeadline).toLocaleDateString() : 'N/A'}\nDates: ${e.startDate ? new Date(e.startDate).toLocaleDateString() : 'N/A'} to ${e.endDate ? new Date(e.endDate).toLocaleDateString() : 'N/A'}\nDetails: ${e.description || 'N/A'}`,
-      })),
-      ...ragContext.chunks.map(c => ({
-        documentTitle: c.documentTitle,
-        pageNumber: c.pageNumber,
-        text: `[OFFICIAL UNIVERSITY REGULATION CLAUSE]\n${c.text}`,
-      })),
-    ];
-
-    const genResult = await generateAnswer(query, contextItems);
-    const answer = (genResult && genResult.answer) ? genResult.answer : String(genResult);
-    const lowerAnswer = answer.toLowerCase();
-    const isAnswerNotFound =
-      lowerAnswer.includes("couldn't find") ||
-      lowerAnswer.includes("could not find") ||
-      lowerAnswer.includes("not found in the available");
-
-    // Group document sources only if generated from them
-    let sources = [];
-    if (!isAnswerNotFound) {
-      sources = ragContext.chunks.map(c => ({
-        documentId: c.documentId,
-        title: c.documentTitle,
-        category: c.category,
-        department: c.department,
-        documentType: c.documentType,
-        pageNumber: c.pageNumber,
-        pageDisplay: `Page ${c.pageNumber}`,
-        sourceUrl: c.sourceUrl || (c.documentId ? `/api/documents/${c.documentId}/file` : null),
-        sourceAuthority: c.sourceAuthority || 'official',
-      }));
-    }
-
-    return {
-      answer,
-      queryType: 'hybrid',
-      intent: classification.intent,
-      sources,
-      structuredData: {
-        courses: courses.length > 0 ? courses : null,
-        events: events.length > 0 ? events : null,
-      },
-      clarification: null,
-      retrieval: {
-        strategy: 'hybrid_structured_rag',
-        retrievedChunks: ragContext.chunks.length,
-        cached: false,
-      },
-    };
-  }
-
-  // --------------------------------------------------------------------------
-  // STRATEGY 6: Default Policy RAG (Phase 4 Cached Hybrid Retrieval)
-  // --------------------------------------------------------------------------
-  const ragResult = await answerQuestion(query, { ...options, user });
   return {
     ...ragResult,
     queryType: 'rag',
-    intent: classification.intent,
+    intent: understanding.intent || 'OFFICIAL_REGULATION',
     clarification: null,
     retrieval: {
       strategy: 'hybrid_rag',

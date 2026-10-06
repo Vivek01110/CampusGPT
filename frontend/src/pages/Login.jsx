@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { GraduationCap, LogIn, AlertCircle, ArrowRight, ShieldCheck, User } from 'lucide-react';
+import { GraduationCap, LogIn, AlertCircle, ArrowRight } from 'lucide-react';
 
 const Login = () => {
   const [email, setEmail] = useState('');
@@ -33,17 +33,6 @@ const Login = () => {
     } else {
       setFormError(result.error || 'Authentication failed. Please verify credentials.');
     }
-  };
-
-  const handleQuickFill = (type) => {
-    if (type === 'student') {
-      setEmail('student@campus.edu');
-      setPassword('student123');
-    } else {
-      setEmail('admin@campus.edu');
-      setPassword('admin123');
-    }
-    setFormError('');
   };
 
   return (
@@ -120,34 +109,6 @@ const Login = () => {
             )}
           </button>
         </form>
-
-        {/* Quick test autofill buttons */}
-        <div className="mt-6 pt-5 border-t border-campus-border">
-          <p className="text-[11px] text-campus-muted font-mono mb-2 text-center">
-            Testing shortcuts (auto-fill credentials):
-          </p>
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={() => handleQuickFill('student')}
-              className="campus-btn-secondary text-xs py-1.5 px-2 flex items-center justify-center gap-1.5"
-            >
-              <User className="w-3.5 h-3.5 text-blue-400" />
-              Student Demo
-            </button>
-            <button
-              type="button"
-              onClick={() => handleQuickFill('admin')}
-              className="campus-btn-secondary text-xs py-1.5 px-2 flex items-center justify-center gap-1.5"
-            >
-              <ShieldCheck className="w-3.5 h-3.5 text-purple-400" />
-              Admin Demo
-            </button>
-          </div>
-          <p className="text-[10px] text-campus-muted text-center mt-2">
-            *If account doesn't exist yet, click Register below with these sample accounts.
-          </p>
-        </div>
 
         {/* Footer */}
         <div className="mt-6 text-center text-xs text-campus-muted">

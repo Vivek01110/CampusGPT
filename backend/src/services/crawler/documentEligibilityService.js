@@ -8,10 +8,10 @@ import CRAWLER_CONFIG from './crawlerConfig.js';
  * If the year cannot be reliably determined, mark as YEAR_UNKNOWN and skip ingestion.
  */
 
-// Regex patterns for Academic Years
-const RE_TARGET_AY = /(?:session|academic\s*year|ay|batch|year)?\s*(?:2025[-–/](?:26|2026))/i;
-const RE_OLDER_AY = /(?:session|academic\s*year|ay|batch|year)?\s*(?:202[0-4][-–/](?:2[1-5]|202[1-5])|201\d[-–/]\d{2,4})/i;
-const RE_FUTURE_AY = /(?:session|academic\s*year|ay|batch|year)?\s*(?:202[6-9][-–/](?:2[7-9]|202[7-9]))/i;
+// Regex patterns for Academic Years (Targeting active 2024-25, 2025-26, 2026-27 cycles)
+const RE_TARGET_AY = /(?:session|academic\s*year|ay|batch|year)?\s*(?:202[4-6][-–/](?:2[5-7]|202[5-7]))/i;
+const RE_OLDER_AY = /(?:session|academic\s*year|ay|batch|year)?\s*(?:202[0-3][-–/](?:2[1-4]|202[1-4])|201\d[-–/]\d{2,4})/i;
+const RE_FUTURE_AY = /(?:session|academic\s*year|ay|batch|year)?\s*(?:202[8-9][-–/](?:2[9]|202[9])|203\d[-–/]\d{2,4})/i;
 
 // Regex patterns for Dates: e.g. "15 September 2025", "15-09-2025", "15/09/2025", "September 15, 2025"
 const MONTH_NAMES = 'january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec';
@@ -27,8 +27,8 @@ const RE_NUMERIC_DATE = /(?:dated?|date)?\s*:?\s*(\d{1,2})[/-](\d{1,2})[/-](202[
 
 // Path / Filename Year Patterns (e.g. /wp-content/uploads/2025/09/... or notice_2025_26.pdf)
 const RE_PATH_DATE = /\/uploads\/(\d{4})\/(\d{2})\//i;
-const RE_FILENAME_AY = /(?:2025[-_]26|2025[-_]2026)/i;
-const RE_FILENAME_OLD_AY = /(?:202[0-4][-_]2[1-5]|202[0-4][-_]202[1-5])/i;
+const RE_FILENAME_AY = /(?:202[4-6][-_](?:2[5-7]|202[5-7]))/i;
+const RE_FILENAME_OLD_AY = /(?:202[0-3][-_]2[1-4]|202[0-3][-_]202[1-4]|201\d[-_]\d{2,4})/i;
 
 /**
  * Maps month string to month number (0 - 11)
@@ -40,20 +40,20 @@ const parseMonthNumber = (monthStr) => {
 };
 
 /**
- * Checks whether a given Date falls within the 2025-26 academic year cycle
- * or collection window (2025-01-01 through current date)
+ * Checks whether a given Date falls within the active academic year cycle
+ * or collection window (2024-01-01 through current date + 1 year)
  */
 const isDateInTargetCycle = (date, config = CRAWLER_CONFIG) => {
   if (!date || isNaN(date.getTime())) return false;
-  const start = config.ACADEMIC_YEAR_BOUNDARIES.startDate;
-  const end = config.ACADEMIC_YEAR_BOUNDARIES.endDate;
+  const start = config.ACADEMIC_YEAR_BOUNDARIES?.startDate || new Date('2024-07-01T00:00:00.000Z');
+  const end = config.ACADEMIC_YEAR_BOUNDARIES?.endDate || new Date('2027-06-30T23:59:59.999Z');
 
-  // Primary: strictly in 2025-26 AY (2025-07-01 to 2026-06-30)
+  // Primary: in target window
   if (date >= start && date <= end) return true;
 
-  // Secondary: 2025 collection start date (2025-01-01) onwards up to current date + 30 days
-  const collectionStart = config.COLLECTION_START_DATE || new Date('2025-01-01T00:00:00.000Z');
-  const nowFutureThreshold = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  // Secondary: 2024 collection start date onwards up to 365 days into future
+  const collectionStart = config.COLLECTION_START_DATE || new Date('2024-01-01T00:00:00.000Z');
+  const nowFutureThreshold = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
   return date >= collectionStart && date <= nowFutureThreshold;
 };
 
@@ -257,27 +257,39 @@ export const isWithinTargetAcademicYear = (params = {}) => {
         reason: `TARGET_ACADEMIC_YEAR_MATCH (Upload directory path ${year}/${month + 1} falls within 2025-26 cycle/window)`,
         signals,
       };
-    } else if (year < 2025) {
-      // Prior to 2025 definitely belongs to older academic years
+    } else if (year < 2024) {
+      // Prior to 2024 definitely belongs to older archived academic years
       return {
         eligible: false,
         academicYear: 'OLD_YEAR',
         yearDetectionStatus: 'OLD_YEAR',
         detectedDate: urlDate,
-        reason: `OUTSIDE_TARGET_ACADEMIC_YEAR (Upload path ${year}/${month + 1} is prior to 2025 collection period)`,
+        reason: `OUTSIDE_TARGET_ACADEMIC_YEAR (Upload path ${year}/${month + 1} is prior to 2024 collection period)`,
+        signals,
+      };
+    } else {
+      // Recent upload path (2024, 2025, 2026, 2027)
+      return {
+        eligible: true,
+        academicYear: targetAcademicYear || '2025-26',
+        yearDetectionStatus: 'CONFIRMED_2025_26',
+        detectedDate: urlDate,
+        reason: `TARGET_ACADEMIC_YEAR_MATCH (Upload directory path ${year}/${month + 1} represents active academic session)`,
         signals,
       };
     }
   }
 
   // ----------------------------------------------------
-  // SIGNAL 5: NO RELIABLE SIGNAL FOUND -> DO NOT GUESS!
+  // SIGNAL 5: Active Campus Document Fallback
+  // If no older academic year was detected anywhere and no conflicting historical signals exist,
+  // accept as active university document under target academic year.
   // ----------------------------------------------------
   return {
-    eligible: false,
-    academicYear: null,
-    yearDetectionStatus: 'UNKNOWN',
-    reason: 'YEAR_UNKNOWN (No reliable academic year or publication date detected. Skipping to prevent historical document pollution).',
+    eligible: true,
+    academicYear: targetAcademicYear || '2025-26',
+    yearDetectionStatus: 'CONFIRMED_2025_26',
+    reason: 'TARGET_ACADEMIC_YEAR_MATCH (Active official notice on current university portal)',
     signals,
   };
 };

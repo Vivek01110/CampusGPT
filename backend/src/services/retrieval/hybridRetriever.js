@@ -33,12 +33,8 @@ export const retrieveHybridContext = async (rawQuery, options = {}) => {
 
   // 1. Query Decomposition & Analysis
   const analysis = analyzeQuery(rawQuery);
+  // Keep filters non-restrictive to prevent discarding high-relevance cross-year or general policies
   const activeFilters = {
-    ...(analysis.category ? { category: analysis.category } : {}),
-    ...(analysis.department ? { department: analysis.department } : {}),
-    ...(analysis.documentType ? { documentType: analysis.documentType } : {}),
-    ...(analysis.academicYear ? { academicYear: analysis.academicYear } : {}),
-    ...(analysis.year ? { year: analysis.year } : {}),
     ...options.filters,
   };
 

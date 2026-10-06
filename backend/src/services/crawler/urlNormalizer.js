@@ -104,7 +104,12 @@ export const normalizeUrl = (rawUrl, baseUrl = null) => {
 
   try {
     const trimmed = rawUrl.trim();
-    if (trimmed.startsWith('javascript:') || trimmed.startsWith('mailto:') || trimmed.startsWith('tel:')) {
+    if (
+      trimmed.startsWith('javascript:') ||
+      trimmed.startsWith('mailto:') ||
+      trimmed.startsWith('tel:') ||
+      (trimmed.includes('@') && !trimmed.includes('/'))
+    ) {
       return null;
     }
 

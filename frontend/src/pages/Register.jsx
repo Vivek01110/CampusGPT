@@ -1,8 +1,7 @@
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { UserPlus, AlertCircle, ArrowRight, Shield, UserCheck } from 'lucide-react';
-
+import { UserPlus, AlertCircle, ArrowRight } from 'lucide-react';
 const Register = () => {
   const [formData, setFormData] = useState({
     name: '',
@@ -155,47 +154,6 @@ const Register = () => {
             </div>
           </div>
 
-          {/* Role Selection */}
-          <div>
-            <label className="block text-xs font-medium text-campus-subtext mb-1.5">
-              Account Role
-            </label>
-            <div className="grid grid-cols-2 gap-3">
-              <label className={`flex items-center gap-2 p-3 rounded-lg border cursor-pointer transition-colors ${
-                formData.role === 'student'
-                  ? 'border-blue-500 bg-blue-500/10 text-white'
-                  : 'border-campus-border bg-campus-bg text-campus-muted hover:border-campus-border/80'
-              }`}>
-                <input
-                  type="radio"
-                  name="role"
-                  value="student"
-                  checked={formData.role === 'student'}
-                  onChange={handleChange}
-                  className="hidden"
-                />
-                <UserCheck className="w-4 h-4 text-blue-400" />
-                <span className="text-xs font-medium">Student</span>
-              </label>
-
-              <label className={`flex items-center gap-2 p-3 rounded-lg border cursor-pointer transition-colors ${
-                formData.role === 'admin'
-                  ? 'border-purple-500 bg-purple-500/10 text-white'
-                  : 'border-campus-border bg-campus-bg text-campus-muted hover:border-campus-border/80'
-              }`}>
-                <input
-                  type="radio"
-                  name="role"
-                  value="admin"
-                  checked={formData.role === 'admin'}
-                  onChange={handleChange}
-                  className="hidden"
-                />
-                <Shield className="w-4 h-4 text-purple-400" />
-                <span className="text-xs font-medium">Administrator</span>
-              </label>
-            </div>
-          </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>

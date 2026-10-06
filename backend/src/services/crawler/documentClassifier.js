@@ -134,6 +134,24 @@ const CLASSIFICATION_RULES = [
     scope: 'student',
   },
   {
+    type: 'placement_policy',
+    patterns: [/placement\s*policy/i, /internship\s*policy/i, /tpo\s*rules/i, /spc\s*policy/i],
+    category: 'placements',
+    scope: 'student',
+  },
+  {
+    type: 'placement_notice',
+    patterns: [/placement/i, /training\s*and\s*placement/i, /tpo/i, /job\s*offer/i, /ctc/i, /package/i, /jinf/i, /sinf/i],
+    category: 'placements',
+    scope: 'student',
+  },
+  {
+    type: 'event',
+    patterns: [/event/i, /workshop/i, /seminar/i, /conference/i, /hackathon/i, /fest/i, /poster/i, /competition/i],
+    category: 'notices',
+    scope: 'student',
+  },
+  {
     type: 'circular',
     patterns: [/circular/i, /notification-notices/i, /notification/i, /office\s*order/i],
     category: 'notices',
