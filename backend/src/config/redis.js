@@ -89,8 +89,8 @@ export const connectRedis = async () => {
   const redisUrl = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
   const useMock = process.env.REDIS_MOCK === 'true';
 
-  if (useMock) {
-    console.log('[REDIS] Mock mode enabled via REDIS_MOCK=true. Using in-memory Redis adapter.');
+  if (useMock || (!process.env.REDIS_URL && process.env.NODE_ENV === 'production')) {
+    console.log('[REDIS] Running in fallback memory adapter mode.');
     isReady = true;
     return memoryFallback;
   }

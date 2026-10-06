@@ -4,19 +4,16 @@ import { connectRedis } from '../src/config/redis.js';
 
 let isInitialized = false;
 
-async function init() {
+app.use(async (req, res, next) => {
   if (!isInitialized) {
     try {
-      await connectDB();
-      await connectRedis();
+      await Promise.allSettled([connectDB(), connectRedis()]);
       isInitialized = true;
     } catch (err) {
       console.error('[Serverless Init Error]', err);
     }
   }
-}
+  next();
+});
 
-export default async function handler(req, res) {
-  await init();
-  return app(req, res);
-}
+export default app;
