@@ -9,22 +9,149 @@ const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Generate a grounded answer using Gemini LLM strictly based on retrieved context,
- * supporting multi-chunk synthesis, partial answers, and graceful clarification.
+ * Helper to filter out internal system tags (e.g. [USED_SOURCES: 1, 2])
+ * from the live token stream so students never see raw metadata tags.
+ */
+class StreamingTokenFilter {
+  constructor(onToken) {
+    this.onToken = onToken;
+    this.buffer = '';
+    this.stopped = false;
+  }
+
+  push(chunk) {
+    if (!this.onToken || this.stopped || !chunk) return;
+    this.buffer += chunk;
+
+    const markerIndex = this.buffer.indexOf('[USED_SOURCES');
+    if (markerIndex !== -1) {
+      // Emit everything prior to the marker
+      const toEmit = this.buffer.slice(0, markerIndex);
+      if (toEmit) {
+        this.onToken(toEmit);
+      }
+      this.buffer = this.buffer.slice(markerIndex);
+      this.stopped = true;
+      return;
+    }
+
+    // Hold back the trailing 20 characters in case [USED_SOURCES is partially split across chunks
+    if (this.buffer.length > 25) {
+      const safeLength = this.buffer.length - 20;
+      const toEmit = this.buffer.slice(0, safeLength);
+      this.buffer = this.buffer.slice(safeLength);
+      this.onToken(toEmit);
+    }
+  }
+
+  flush() {
+    if (!this.onToken || this.stopped) return;
+    if (this.buffer.length > 0) {
+      const markerIndex = this.buffer.indexOf('[USED_SOURCES');
+      const toEmit = markerIndex !== -1 ? this.buffer.slice(0, markerIndex) : this.buffer;
+      if (toEmit) {
+        this.onToken(toEmit);
+      }
+      this.buffer = '';
+    }
+  }
+}
+
+/**
+ * Low-level SSE stream consumer for Google Gemini API streamGenerateContent endpoint
+ */
+async function streamGeminiContent(url, payload, onChunk) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(45000),
+  });
+
+  if (!response.ok) {
+    let errMsg = `Gemini HTTP ${response.status}`;
+    try {
+      const errJson = await response.json();
+      if (errJson.error?.message) errMsg = errJson.error.message;
+    } catch {}
+    throw new Error(errMsg);
+  }
+
+  if (!response.body) {
+    throw new Error('Gemini response body is missing readable stream');
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  let fullAccumulated = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop(); // keep last incomplete line
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('data: ')) {
+        const jsonStr = trimmed.slice(6).trim();
+        if (!jsonStr) continue;
+
+        try {
+          const parsed = JSON.parse(jsonStr);
+          const chunkText = parsed.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (chunkText) {
+            fullAccumulated += chunkText;
+            if (onChunk) {
+              onChunk(chunkText);
+            }
+          }
+        } catch {
+          // ignore heartbeat or partial JSON fragment
+        }
+      }
+    }
+  }
+
+  // Process any leftover fragment in buffer
+  if (buffer.trim().startsWith('data: ')) {
+    const jsonStr = buffer.trim().slice(6).trim();
+    if (jsonStr) {
+      try {
+        const parsed = JSON.parse(jsonStr);
+        const chunkText = parsed.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (chunkText) {
+          fullAccumulated += chunkText;
+          if (onChunk) onChunk(chunkText);
+        }
+      } catch {}
+    }
+  }
+
+  return fullAccumulated;
+}
+
+/**
+ * Generate a grounded answer using Gemini LLM with streaming support,
+ * strictly based on retrieved context chunks.
  * 
  * @param {string} question - User inquiry
  * @param {Array<{ text: string, documentTitle: string, pageNumber: number }>|string} contexts - Retrieved chunks
  * @param {object} [options] - Generation options
  * @param {object} [options.coverageReport] - Evidence coverage assessment
- * @returns {Promise<string>} Grounded answer
+ * @param {function} [options.onToken] - Optional chunk callback for live token streaming
+ * @returns {Promise<String>} Grounded answer with .answer and .usedSourceIndices properties
  */
-export const generateAnswer = async (question, contexts = [], options = {}) => {
+export const generateAnswerStream = async (question, contexts = [], options = {}) => {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error('GEMINI_API_KEY environment variable is not configured');
   }
 
-  const { coverageReport = null } = options;
+  const { coverageReport = null, onToken = null } = options;
 
   // Format retrieved chunks into context string
   let contextBlock = '';
@@ -108,10 +235,9 @@ GROUNDED ANSWER:`;
   let lastError;
 
   for (const model of modelsToTry) {
-    // Try each model with up to 2 attempts for transient 503 spikes
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
+        const streamUrl = `${GEMINI_API_BASE}/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
 
         const payload = {
           systemInstruction: {
@@ -128,22 +254,16 @@ GROUNDED ANSWER:`;
           },
         };
 
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-          signal: AbortSignal.timeout(35000),
+        const tokenFilter = new StreamingTokenFilter(onToken);
+
+        const rawReply = await streamGeminiContent(streamUrl, payload, (chunk) => {
+          tokenFilter.push(chunk);
         });
 
-        const data = await response.json();
+        tokenFilter.flush();
 
-        if (!response.ok || data.error) {
-          throw new Error(data.error?.message || `LLM generation error (${response.status})`);
-        }
-
-        const reply = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (reply) {
-          const usedMatch = reply.match(/\[USED_SOURCES:\s*([^\]]+)\]/i);
+        if (rawReply) {
+          const usedMatch = rawReply.match(/\[USED_SOURCES:\s*([^\]]+)\]/i);
           let usedSourceIndices = [];
           if (usedMatch) {
             const val = usedMatch[1].trim();
@@ -154,7 +274,8 @@ GROUNDED ANSWER:`;
                 .filter((n) => !isNaN(n) && n > 0);
             }
           }
-          const cleanAnswer = reply.replace(/\n*\[USED_SOURCES:[^\]]*\]/gi, '').trim();
+
+          const cleanAnswer = rawReply.replace(/\n*\[USED_SOURCES:[^\]]*\]/gi, '').trim();
 
           // Return string object with attached metadata for 100% backward compatibility
           const result = new String(cleanAnswer);
@@ -164,8 +285,7 @@ GROUNDED ANSWER:`;
         }
       } catch (err) {
         lastError = err;
-        // If 503 high demand spike, pause briefly before retrying
-        if (err.message.includes('high demand') || err.message.includes('503')) {
+        if (err.message?.includes('high demand') || err.message?.includes('503')) {
           await sleep(1200);
         }
       }
@@ -176,18 +296,31 @@ GROUNDED ANSWER:`;
 };
 
 /**
+ * Generate a grounded answer (synchronous signature, backward compatible)
+ */
+export const generateAnswer = async (question, contexts = [], options = {}) => {
+  return generateAnswerStream(question, contexts, options);
+};
+
+/**
  * Generate an answer for general knowledge, coding, or concept questions
- * using Gemini's general model knowledge directly (without forcing campus RAG).
+ * using Gemini's general model knowledge directly with streaming support.
  * 
  * @param {string} question - User question
- * @param {string} [systemContext] - Optional context or instruction
+ * @param {object|string} [optionsOrSystemContext] - Options or optional context string
  * @returns {Promise<string>} Rich formatted response
  */
-export const generateGeneralAnswer = async (question, systemContext = '') => {
+export const generateGeneralAnswerStream = async (question, optionsOrSystemContext = {}) => {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error('GEMINI_API_KEY environment variable is not configured');
   }
+
+  const options = typeof optionsOrSystemContext === 'string'
+    ? { systemContext: optionsOrSystemContext }
+    : optionsOrSystemContext || {};
+
+  const { systemContext = '', onToken = null } = options;
 
   const systemInstruction = `You are CampusGPT, an intelligent academic and technical AI assistant.
 Answer the user's question clearly, accurately, and thoroughly using modern ChatGPT-style presentation.
@@ -206,10 +339,11 @@ Formatting Guidelines:
   ];
 
   let lastError;
+
   for (const model of modelsToTry) {
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
+        const streamUrl = `${GEMINI_API_BASE}/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
         const payload = {
           systemInstruction: {
             parts: [{ text: systemInstruction }],
@@ -225,25 +359,16 @@ Formatting Guidelines:
           },
         };
 
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-          signal: AbortSignal.timeout(35000),
+        const rawReply = await streamGeminiContent(streamUrl, payload, (chunk) => {
+          if (onToken) onToken(chunk);
         });
 
-        const data = await response.json();
-        if (!response.ok || data.error) {
-          throw new Error(data.error?.message || `LLM generation error (${response.status})`);
-        }
-
-        const reply = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (reply) {
-          return reply.trim();
+        if (rawReply) {
+          return rawReply.trim();
         }
       } catch (err) {
         lastError = err;
-        if (err.message.includes('high demand') || err.message.includes('503')) {
+        if (err.message?.includes('high demand') || err.message?.includes('503')) {
           await sleep(1200);
         }
       }
@@ -253,7 +378,16 @@ Formatting Guidelines:
   throw new Error(`[LLM General Failed] ${lastError?.message || 'Unable to generate response'}`);
 };
 
+/**
+ * Generate general answer (backward compatible non-streaming signature)
+ */
+export const generateGeneralAnswer = async (question, systemContext = '') => {
+  return generateGeneralAnswerStream(question, { systemContext });
+};
+
 export default {
   generateAnswer,
+  generateAnswerStream,
   generateGeneralAnswer,
+  generateGeneralAnswerStream,
 };

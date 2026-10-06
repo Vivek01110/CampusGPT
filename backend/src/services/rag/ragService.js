@@ -1,6 +1,6 @@
 import { retrieveHybridContext } from '../retrieval/hybridRetriever.js';
 import { retrieveVectorCandidates } from '../retrieval/vectorRetriever.js';
-import { generateAnswer } from '../ai/llmService.js';
+import { generateAnswer, generateAnswerStream } from '../ai/llmService.js';
 import { assessEvidenceCoverage } from './evidenceAssessor.js';
 import { assessEvidenceLLM } from './evidenceAssessmentService.js';
 import { analyzeQuery } from '../query/queryAnalyzer.js';
@@ -177,6 +177,8 @@ export const isChunkUsedInAnswer = (chunk, answer) => {
  * }>}
  */
 export const answerQuestion = async (question, options = {}) => {
+  const callbacks = options.callbacks || {};
+
   if (!question || !question.trim()) {
     return {
       answer: 'Please provide a valid campus question.',
@@ -207,6 +209,10 @@ export const answerQuestion = async (question, options = {}) => {
     });
 
     if (exactResult) {
+      callbacks.onStatus?.('Found verified answer in campus records');
+      callbacks.onSources?.(exactResult.sources || []);
+      callbacks.onToken?.(exactResult.answer);
+
       return {
         answer: exactResult.answer,
         sources: exactResult.sources || [],
@@ -237,6 +243,10 @@ export const answerQuestion = async (question, options = {}) => {
     });
 
     if (semanticResult) {
+      callbacks.onStatus?.('Found verified answer in campus records');
+      callbacks.onSources?.(semanticResult.sources || []);
+      callbacks.onToken?.(semanticResult.answer);
+
       return {
         answer: semanticResult.answer,
         sources: semanticResult.sources || [],
@@ -273,6 +283,8 @@ export const answerQuestion = async (question, options = {}) => {
 
   const queryToSearch = options.rewrittenQuery || query;
 
+  callbacks.onStatus?.('Searching official documents...');
+
   if (options.mode === 'vector_only') {
     const topK = options.topK || parseInt(process.env.RAG_TOP_K, 10) || 5;
     analysis = analyzeQuery(queryToSearch);
@@ -289,6 +301,7 @@ export const answerQuestion = async (question, options = {}) => {
   }
 
   // Assess evidence coverage dynamically using Gemini LLM (Claim-level validation)
+  callbacks.onStatus?.('Assessing document evidence...');
   let coverageReport = await assessEvidenceLLM(query, retrievedChunks);
   diagnostics.coverage = coverageReport.coverage;
   diagnostics.confidence = coverageReport.confidence;
@@ -306,6 +319,7 @@ export const answerQuestion = async (question, options = {}) => {
         : null;
 
     if (retryQuery && retryQuery !== queryToSearch) {
+      callbacks.onStatus?.('Refining search with related campus terms...');
       console.log(`[RAG RETRY] Evidence insufficient on first retrieval. Retrying with expanded query: "${retryQuery}"...`);
       const retryResult = await retrieveHybridContext(retryQuery, { ...options, _isRetry: true });
       if (retryResult.chunks && retryResult.chunks.length > 0) {
@@ -328,9 +342,18 @@ export const answerQuestion = async (question, options = {}) => {
     }
   }
 
+  // Send early sources as soon as retrieved chunks are ready
+  if (retrievedChunks && retrievedChunks.length > 0) {
+    const earlySources = groupSources(retrievedChunks);
+    if (earlySources.length > 0) {
+      callbacks.onSources?.(earlySources);
+    }
+  }
+
   // Anti-hallucination check: if genuinely no relevant context found
   if (!retrievedChunks || retrievedChunks.length === 0 || !coverageReport.sufficient) {
     const unverifiedAnswer = "I couldn't find this information in the available university documents.";
+    callbacks.onToken?.(unverifiedAnswer);
 
     return {
       answer: unverifiedAnswer,
@@ -346,10 +369,14 @@ export const answerQuestion = async (question, options = {}) => {
   }
 
   // Grounded LLM generation with coverage guidance (Full or Partial)
+  callbacks.onStatus?.('Generating answer...');
   console.log(
     `[RAG] Generating answer with ${retrievedChunks.length} context chunk(s) [Coverage: ${coverageReport.coverage}]...`
   );
-  const genResult = await generateAnswer(query, retrievedChunks, { coverageReport });
+  const genResult = await generateAnswerStream(query, retrievedChunks, {
+    coverageReport,
+    onToken: callbacks.onToken,
+  });
   const answer = (genResult && genResult.answer) ? genResult.answer : String(genResult);
   const usedIndices = (genResult && genResult.usedSourceIndices) ? genResult.usedSourceIndices : [];
   console.log(`[RAG] Grounded answer generated successfully. Used source indices: [${usedIndices.join(', ')}]`);
@@ -396,6 +423,7 @@ export const answerQuestion = async (question, options = {}) => {
     // Group only the verified contributing chunks into sources
     if (contributingChunks.length > 0) {
       sources = groupSources(contributingChunks);
+      callbacks.onSources?.(sources);
     }
   }
 

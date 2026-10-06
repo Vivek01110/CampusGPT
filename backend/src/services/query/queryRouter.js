@@ -7,7 +7,7 @@ import academicEventService from '../events/academicEventService.js';
 import documentSearchService from '../documents/documentSearchService.js';
 import { answerQuestion } from '../rag/ragService.js';
 import { retrieveHybridContext } from '../retrieval/hybridRetriever.js';
-import { generateAnswer, generateGeneralAnswer } from '../ai/llmService.js';
+import { generateAnswer, generateGeneralAnswer, generateGeneralAnswerStream } from '../ai/llmService.js';
 import User from '../../models/User.js';
 import ChatMessage from '../../models/ChatMessage.js';
 
@@ -263,6 +263,13 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
   console.log(`[QUERY ROUTER] Query: "${query.slice(0, 50)}..." -> Dynamic Intent: ${understanding.intent}, Type: ${understanding.queryType}`);
   console.log(`[QUERY ROUTER] Resolved Entities:`, JSON.stringify(resolvedEntities), `Sources:`, JSON.stringify(entitySources));
 
+  const callbacks = options.callbacks || {};
+  callbacks.onMetadata?.({
+    queryType: understanding.queryType,
+    intent: understanding.intent,
+    resolvedEntities,
+  });
+
   // --------------------------------------------------------------------------
   // ROUTE 0: Conversational Chat & Greetings
   // --------------------------------------------------------------------------
@@ -274,6 +281,8 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
     } else if (/who are you|what can you do|what are you/i.test(lowerQuery)) {
       chatAnswer = "I'm CampusGPT, an intelligent assistant for NIT Kurukshetra. I can help you with official academic ordinances, attendance regulations, examination schedules, previous year question papers (PYQs), placement policies, and syllabus details.";
     }
+
+    callbacks.onToken?.(chatAnswer);
 
     return {
       answer: chatAnswer,
@@ -293,7 +302,8 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
   // --------------------------------------------------------------------------
   if (understanding.queryType === 'general') {
     console.log(`[QUERY ROUTER] Routing to Gemini General Knowledge (no campus RAG): "${query}"`);
-    const generalAnswer = await generateGeneralAnswer(query);
+    callbacks.onStatus?.('Generating academic response...');
+    const generalAnswer = await generateGeneralAnswerStream(query, { onToken: callbacks.onToken });
 
     return {
       answer: generalAnswer,
@@ -313,13 +323,15 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
   // --------------------------------------------------------------------------
   if (understanding.queryType === 'hybrid') {
     console.log(`[QUERY ROUTER] Routing to Hybrid Pipeline (General Concept + NIT Kurukshetra RAG)...`);
+    callbacks.onStatus?.('Generating conceptual explanation...');
     const generalPart = understanding.hybridSplit?.generalPart || query;
     const institutePart = understanding.hybridSplit?.institutePart || query;
 
     // 1. Conceptual answer from Gemini
-    const generalAnswer = await generateGeneralAnswer(generalPart);
+    const generalAnswer = await generateGeneralAnswerStream(generalPart, { onToken: callbacks.onToken });
 
     // 2. Institute specific check: course search or RAG
+    callbacks.onStatus?.('Searching NIT Kurukshetra records...');
     let instituteAnswer = '';
     let instituteSources = [];
 
@@ -340,6 +352,7 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
         user,
         rewrittenQuery: understanding.rewrittenQuery,
         expandedTerms: understanding.expandedTerms,
+        callbacks,
       });
       instituteAnswer = ragResult.answer;
       instituteSources = ragResult.sources || [];
@@ -373,8 +386,12 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
         ? "Which subject's previous-year questions do you need? For example: DBMS, Operating Systems, Computer Networks, or Data Structures."
         : "Could you please specify your semester or programme so I can retrieve the exact official document?");
 
+    callbacks.onStatus?.('Clarification needed');
+    const clarificationAnswer = `${questionText}\n\nPlease specify your request so I can give you the exact official documents.`;
+    callbacks.onToken?.(clarificationAnswer);
+
     return {
-      answer: `${questionText}\n\nPlease specify your request so I can give you the exact official documents.`,
+      answer: clarificationAnswer,
       queryType: 'clarification',
       intent: understanding.intent,
       coverage: 'CLARIFICATION',
@@ -394,6 +411,7 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
   // ROUTE 4: Document Discovery & PYQ Search (Integrated Knowledge Source)
   // --------------------------------------------------------------------------
   if (isPYQQuery || understanding.entities?.documentType === 'question_paper') {
+    callbacks.onStatus?.('Searching question paper drive...');
     const searchTerm = resolvedEntities.subject || query;
     const examYear = (typeof resolvedEntities.year === 'number' && resolvedEntities.year > 1900)
       ? resolvedEntities.year
@@ -427,6 +445,9 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
         pageDisplay: 'Original PDF',
       }));
 
+      callbacks.onSources?.(sources);
+      callbacks.onToken?.(formattedDocs);
+
       return {
         answer: formattedDocs,
         queryType: 'document_search',
@@ -446,6 +467,7 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
       rewrittenQuery: understanding.rewrittenQuery,
       expandedTerms: understanding.expandedTerms,
       filters: { sourceType: 'student_drive' },
+      callbacks,
     });
 
     return {
@@ -464,6 +486,7 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
   // ROUTE 5: Structured Course Catalog Search
   // --------------------------------------------------------------------------
   if (understanding.intent === 'COURSE_CATALOG' || understanding.intent === 'COURSE_SEARCH') {
+    callbacks.onStatus?.('Searching course catalog...');
     const courseSearchTerm = resolvedEntities.subject || resolvedEntities.courseCode || query;
     const courses = await courseService.searchCourses(courseSearchTerm, {
       department: resolvedEntities.department || resolvedEntities.branch,
@@ -473,6 +496,8 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
 
     if (courses && courses.length > 0) {
       const formattedText = formatCoursesResponse(courses, query);
+      callbacks.onToken?.(formattedText);
+
       return {
         answer: formattedText,
         queryType: 'structured',
@@ -497,6 +522,7 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
     rewrittenQuery: understanding.rewrittenQuery,
     expandedTerms: understanding.expandedTerms,
     resolvedEntities,
+    callbacks,
   });
 
   return {

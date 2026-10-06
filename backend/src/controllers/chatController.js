@@ -78,15 +78,15 @@ export const sendMessage = async (req, res, next) => {
  */
 export const getChatHistory = async (req, res, next) => {
   try {
-    const messages = await ChatMessage.find({ userId: req.user._id })
-      .sort({ createdAt: 1 })
+    const recentMessages = await ChatMessage.find({ userId: req.user._id })
+      .sort({ createdAt: -1 })
       .limit(50);
 
     return res.status(200).json({
       success: true,
       message: 'Chat history retrieved.',
       data: {
-        messages,
+        messages: recentMessages.reverse(),
       },
     });
   } catch (error) {
@@ -150,8 +150,113 @@ export const debugRetrieval = async (req, res, next) => {
   }
 };
 
+/**
+ * @desc    Submit user inquiry and receive live grounded answer via SSE streaming
+ * @route   POST /api/chat/stream
+ * @access  Private (Authenticated users)
+ */
+export const sendMessageStream = async (req, res, next) => {
+  const { message, options } = req.body;
+
+  if (!message || typeof message !== 'string' || !message.trim()) {
+    return res.status(400).json({
+      success: false,
+      message: 'Please provide a non-empty message for the campus assistant.',
+    });
+  }
+
+  const trimmedQuery = message.trim();
+
+  // Set SSE Headers
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  let isClientConnected = true;
+  req.on('close', () => {
+    isClientConnected = false;
+    console.log('[SSE] Client disconnected from /api/chat/stream. Continuing background execution to persist response...');
+  });
+
+  const sendEvent = (event, data) => {
+    if (isClientConnected && !res.writableEnded) {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    }
+  };
+
+  // 1. Initial connection event
+  sendEvent('connected', { timestamp: Date.now() });
+
+  try {
+    // 2. Call Intelligent Query Routing with live SSE callbacks
+    const routeResult = await routeQuery(trimmedQuery, req.user, {
+      ...(options || {}),
+      callbacks: {
+        onStatus: (statusMsg) => {
+          sendEvent('status', { message: statusMsg });
+        },
+        onMetadata: (meta) => {
+          sendEvent('metadata', meta);
+        },
+        onSources: (sourcesList) => {
+          sendEvent('sources', { sources: sourcesList });
+        },
+        onToken: (tokenChunk) => {
+          sendEvent('token', { token: tokenChunk });
+        },
+      },
+    });
+
+    // 3. Persist conversation in MongoDB regardless of whether client disconnected
+    try {
+      await ChatMessage.create({
+        userId: req.user._id,
+        role: 'user',
+        content: trimmedQuery,
+        sources: [],
+      });
+
+      await ChatMessage.create({
+        userId: req.user._id,
+        role: 'assistant',
+        content: routeResult.answer,
+        sources: routeResult.sources || [],
+      });
+    } catch (dbErr) {
+      console.warn(`[Chat History Warning] Failed to log chat message: ${dbErr.message}`);
+    }
+
+    // 4. Send final completion event
+    sendEvent('done', {
+      answer: routeResult.answer,
+      queryType: routeResult.queryType || 'rag',
+      intent: routeResult.intent || 'policy_question',
+      coverage: routeResult.coverage || 'FULL',
+      sources: routeResult.sources || [],
+      clarification: routeResult.clarification || null,
+      structuredData: routeResult.structuredData || null,
+      cache: routeResult.cache || { hit: false, type: 'miss' },
+    });
+
+    if (isClientConnected && !res.writableEnded) {
+      res.end();
+    }
+  } catch (error) {
+    console.error('[SSE Stream Error]', error);
+    sendEvent('error', {
+      message: 'I encountered an issue processing your request. Please try again in a moment.',
+    });
+    if (!res.writableEnded) {
+      res.end();
+    }
+  }
+};
+
 export default {
   sendMessage,
+  sendMessageStream,
   getChatHistory,
   debugRetrieval,
 };
