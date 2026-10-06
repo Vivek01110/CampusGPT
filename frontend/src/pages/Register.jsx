@@ -93,7 +93,7 @@ const Register = () => {
               name="name"
               value={formData.name}
               onChange={handleChange}
-              placeholder="e.g. Vivek Sharma"
+              placeholder="e.g. Walter White"
               required
               className="campus-input"
             />
@@ -108,7 +108,7 @@ const Register = () => {
               name="email"
               value={formData.email}
               onChange={handleChange}
-              placeholder="e.g. vivek@campus.edu"
+              placeholder="e.g. walter@nitkkr.ac.in"
               required
               className="campus-input"
             />
