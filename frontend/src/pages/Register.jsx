@@ -108,7 +108,7 @@ const Register = () => {
               name="email"
               value={formData.email}
               onChange={handleChange}
-              placeholder="e.g. walter@nitkkr.ac.in"
+              placeholder="walter@nitkkr.ac.in"
               required
               className="campus-input"
             />
