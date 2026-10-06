@@ -72,7 +72,7 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Health Check API - Multi-service status monitoring
 
-api.get('/api/wakeuprender', async (req, res) => {
+app.get('/api/wakeuprender', async (req, res) => {
   res.status(200).json({
     status: "ok",
     timestamp: new Date().toISOString()
