@@ -11,14 +11,18 @@ dns.setServers(["8.8.8.8", "8.8.4.4"]);
 await connectDB();
 await connectRedis();
 
-// Start Server Listener
-const server = app.listen(PORT, () => {
-  console.log(`===============================================`);
-  console.log(` AskCampusAi Backend Server Running on Port ${PORT}`);
-  console.log(` Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(` Health Check: http://localhost:${PORT}/api/health`);
-  console.log(`===============================================`);
-});
+let server;
+if (!process.env.VERCEL) {
+  await connectDB();
+  await connectRedis();
+  server = app.listen(PORT, () => {
+    console.log(`===============================================`);
+    console.log(` AskCampusAi Backend Server Running on Port ${PORT}`);
+    console.log(` Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(` Health Check: http://localhost:${PORT}/api/health`);
+    console.log(`===============================================`);
+  });
+}
 
 // Process error listeners
 process.on('unhandledRejection', (err) => {
@@ -29,4 +33,5 @@ process.on('uncaughtException', (err) => {
   console.error(`[UncaughtException] ${err?.message || err}`);
 });
 
+export default app;
 export { app, server };

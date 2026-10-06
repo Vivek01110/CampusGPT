@@ -2,7 +2,7 @@
   "name": "askcampusai-backend",
   "version": "1.0.0",
   "description": "Backend API for AskCampusAi - AI-Powered University Campus Assistant (Phase 1)",
-  "main": "src/server.js",
+  "main": "api/index.js",
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
