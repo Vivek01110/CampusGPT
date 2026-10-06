@@ -7,7 +7,8 @@ import documentRoutes from './routes/documentRoutes.js';
 import chatRoutes from './routes/chatRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
 import { notFound, errorHandler } from './middleware/errorMiddleware.js';
-import { getRedisStatus } from './config/redis.js';
+import { connectRedis, getRedisStatus } from './config/redis.js';
+import connectDB from './config/db.js';
 import { getCollectionInfo } from './services/vector/qdrantService.js';
 
 const app = express();
@@ -69,6 +70,20 @@ app.options('*', cors(corsOptions));
 // Body parser
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Ensure Database and Redis are connected on demand for Serverless (Vercel) & Container runtimes
+let isDbInitialized = false;
+app.use(async (req, res, next) => {
+  if (!isDbInitialized) {
+    try {
+      await Promise.allSettled([connectDB(), connectRedis()]);
+      isDbInitialized = true;
+    } catch (err) {
+      console.warn('[DB Init Warning]', err.message);
+    }
+  }
+  next();
+});
 
 // Health Check API - Multi-service status monitoring
 app.get('/api/health', async (req, res) => {
