@@ -18,11 +18,12 @@ import {
   MoreVertical,
   Pencil,
   Check,
+  Pin,
 } from 'lucide-react';
 
 const Sidebar = ({ mobileOpen, setMobileOpen }) => {
   const { user, isAdmin, logout } = useAuth();
-  const { chats, activeChatId, createNewChat, selectChat, renameChat, deleteChat } = useChat();
+  const { chats, activeChatId, createNewChat, selectChat, renameChat, pinChat, deleteChat } = useChat();
   const [chatsFolderOpen, setChatsFolderOpen] = useState(true);
   const [activeMenuChatId, setActiveMenuChatId] = useState(null);
   const [editingChatId, setEditingChatId] = useState(null);
@@ -195,7 +196,12 @@ const Sidebar = ({ mobileOpen, setMobileOpen }) => {
               ) : (
                 chats.map((chat) => {
                   const isCurrent =
-                    activeChatId === chat.id && location.pathname === '/assistant';
+                    Boolean(
+                      activeChatId &&
+                        (String(activeChatId) === String(chat.id) ||
+                          String(activeChatId) === String(chat._id) ||
+                          (chat.tempId && String(activeChatId) === String(chat.tempId)))
+                    ) && location.pathname === '/assistant';
                   const isEditing = editingChatId === chat.id;
                   const isMenuOpen = activeMenuChatId === chat.id;
 
@@ -245,11 +251,9 @@ const Sidebar = ({ mobileOpen, setMobileOpen }) => {
                       ) : (
                         <>
                           <div className="flex items-center gap-2 min-w-0 flex-1">
-                            <MessageSquare
-                              className={`w-3.5 h-3.5 flex-shrink-0 ${
-                                isCurrent ? 'text-blue-400' : 'text-zinc-400 group-hover:text-blue-400'
-                              } transition-colors`}
-                            />
+                            {chat.pinned && (
+                              <Pin className="w-3.5 h-3.5 flex-shrink-0 text-amber-400 rotate-45" />
+                            )}
                             <span className="truncate">{chat.title || 'Campus Inquiry'}</span>
                           </div>
 
@@ -276,7 +280,19 @@ const Sidebar = ({ mobileOpen, setMobileOpen }) => {
 
                             {/* Dropdown Menu */}
                             {isMenuOpen && (
-                              <div className="absolute right-0 top-full mt-1 w-32 bg-zinc-900 border border-campus-border rounded-lg shadow-xl py-1 z-50 animate-in fade-in zoom-in-95 duration-100">
+                              <div className="absolute right-0 top-full mt-1 w-36 bg-zinc-900 border border-campus-border rounded-lg shadow-xl py-1 z-50 animate-in fade-in zoom-in-95 duration-100">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setActiveMenuChatId(null);
+                                    pinChat(chat.id);
+                                  }}
+                                  className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-zinc-200 hover:text-white hover:bg-campus-card transition-colors text-left"
+                                >
+                                  <Pin className={`w-3.5 h-3.5 ${chat.pinned ? 'text-amber-400' : 'text-zinc-400'}`} />
+                                  <span>{chat.pinned ? 'Unpin chat' : 'Pin chat'}</span>
+                                </button>
                                 <button
                                   type="button"
                                   onClick={(e) => {

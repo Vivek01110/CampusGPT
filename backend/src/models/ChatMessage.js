@@ -8,6 +8,12 @@ const chatMessageSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    conversationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Conversation',
+      index: true,
+      default: null,
+    },
     role: {
       type: String,
       enum: ['user', 'assistant'],
@@ -37,13 +43,20 @@ const chatMessageSchema = new mongoose.Schema(
         },
       },
     ],
+    suggestions: [
+      {
+        type: String,
+        trim: true,
+      },
+    ],
   },
   {
     timestamps: true,
   }
 );
 
-// Index for user chat history retrieval
+// Indexes for conversation and user chat history retrieval
+chatMessageSchema.index({ conversationId: 1, createdAt: 1 });
 chatMessageSchema.index({ userId: 1, createdAt: -1 });
 
 const ChatMessage = mongoose.model('ChatMessage', chatMessageSchema);

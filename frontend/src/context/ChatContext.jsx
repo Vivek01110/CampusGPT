@@ -1,11 +1,11 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from './AuthContext';
-import { chatAPI } from '../services/api';
+import { chatAPI, conversationAPI } from '../services/api';
 
 const ChatContext = createContext(null);
 
 /**
- * Extracts a concise, professional topic name for the chat folder
+ * Extracts a concise, professional fallback topic name for the chat folder
  */
 export const extractTopicName = (text) => {
   if (!text || typeof text !== 'string') return 'Campus Inquiry';
@@ -20,9 +20,7 @@ export const extractTopicName = (text) => {
     lower.includes('tpo') ||
     lower.includes('spc') ||
     lower.includes('package') ||
-    lower.includes('ctc') ||
-    lower.includes('jinf') ||
-    lower.includes('sinf')
+    lower.includes('ctc')
   ) {
     return 'Placement Policy';
   }
@@ -75,8 +73,7 @@ export const extractTopicName = (text) => {
     lower.includes('admission') ||
     lower.includes('cutoff') ||
     lower.includes('seat') ||
-    lower.includes('counseling') ||
-    lower.includes('counselling')
+    lower.includes('counseling')
   ) {
     return 'Admissions & Cutoffs';
   }
@@ -92,12 +89,11 @@ export const extractTopicName = (text) => {
     return 'Academic Calendar';
   }
   if (
-    lower.includes('club') ||
-    lower.includes('fest') ||
-    lower.includes('sports') ||
-    lower.includes('gymkhana')
+    lower.includes('pyq') ||
+    lower.includes('previous year') ||
+    lower.includes('question paper')
   ) {
-    return 'Campus Activities';
+    return 'Exam PYQs';
   }
 
   // 2. Natural cleanup for custom user questions
@@ -118,48 +114,34 @@ export const extractTopicName = (text) => {
 export const ChatProvider = ({ children }) => {
   const { user } = useAuth();
   const userId = user?._id || user?.id || null;
+  const currentUserIdRef = useRef(userId);
 
-  const currentUserIdRef = React.useRef(userId);
+  const [chats, setChats] = useState([]);
+  const [activeChatId, setActiveChatId] = useState(null);
+  const [isLoadingChats, setIsLoadingChats] = useState(false);
 
-  // Clean up legacy fallback key if present
-  useEffect(() => {
-    try {
-      localStorage.removeItem('campusgpt_chats_default_user');
-      localStorage.removeItem('campusgpt_active_chat_id_default_user');
-    } catch (e) {}
-  }, []);
-
-  const [chats, setChats] = useState(() => {
-    if (!userId) return [];
-    try {
-      const saved = localStorage.getItem(`campusgpt_chats_${userId}`);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) return parsed;
+  // Helper to sort chats: pinned first, then newest updatedAt
+  const sortConversations = (convList) => {
+    return [...convList].sort((a, b) => {
+      if (a.pinned !== b.pinned) {
+        return a.pinned ? -1 : 1;
       }
-    } catch (e) {
-      console.warn('Failed to load chats from localStorage:', e);
-    }
-    return [];
-  });
+      const timeA = new Date(a.updatedAt || a.createdAt || 0).getTime();
+      const timeB = new Date(b.updatedAt || b.createdAt || 0).getTime();
+      return timeB - timeA;
+    });
+  };
 
-  const [activeChatId, setActiveChatId] = useState(() => {
-    if (!userId) return null;
-    try {
-      const active = localStorage.getItem(`campusgpt_active_chat_id_${userId}`);
-      if (active) return active;
-      const saved = localStorage.getItem(`campusgpt_chats_${userId}`);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed[0].id;
-        }
-      }
-      return null;
-    } catch (e) {
-      return null;
-    }
-  });
+  // Helper to check if two IDs match across string/ObjectId/tempId
+  const matchId = (chatObj, searchId) => {
+    if (!chatObj || !searchId) return false;
+    const targetStr = String(searchId);
+    return (
+      String(chatObj.id) === targetStr ||
+      String(chatObj._id) === targetStr ||
+      (chatObj.tempId && String(chatObj.tempId) === targetStr)
+    );
+  };
 
   // Sync state cleanly when user identity changes
   useEffect(() => {
@@ -171,200 +153,226 @@ export const ChatProvider = ({ children }) => {
       return;
     }
 
-    const storageKey = `campusgpt_chats_${userId}`;
-    const activeKey = `campusgpt_active_chat_id_${userId}`;
-
-    try {
-      const savedChats = localStorage.getItem(storageKey);
-      if (savedChats) {
-        const parsed = JSON.parse(savedChats);
-        setChats(Array.isArray(parsed) ? parsed : []);
-      } else {
-        setChats([]);
-      }
-      setActiveChatId(localStorage.getItem(activeKey) || null);
-    } catch (e) {
-      setChats([]);
-      setActiveChatId(null);
-    }
-  }, [userId]);
-
-  // Persist chats strictly for the current active user (debounced for streaming performance)
-  useEffect(() => {
-    if (!userId || currentUserIdRef.current !== userId) return;
-    const timer = setTimeout(() => {
+    const loadConversations = async () => {
+      setIsLoadingChats(true);
       try {
-        const storageKey = `campusgpt_chats_${userId}`;
-        localStorage.setItem(storageKey, JSON.stringify(chats));
-      } catch (e) {
-        console.warn('Failed to persist chats:', e);
-      }
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [chats, userId]);
+        const res = await conversationAPI.list();
+        const convList = res?.data?.conversations || [];
 
-  // Persist activeChatId strictly for the current active user
-  useEffect(() => {
-    if (!userId || currentUserIdRef.current !== userId) return;
-    try {
-      const activeKey = `campusgpt_active_chat_id_${userId}`;
-      if (activeChatId) {
-        localStorage.setItem(activeKey, activeChatId);
-      } else {
-        localStorage.removeItem(activeKey);
-      }
-    } catch (e) {
-      console.warn('Failed to persist activeChatId:', e);
-    }
-  }, [activeChatId, userId]);
+        if (currentUserIdRef.current !== userId) return;
 
-  // Import existing history from backend database only once if user's local chats are completely empty
-  useEffect(() => {
-    if (!userId) return;
+        if (convList.length > 0) {
+          const sorted = sortConversations(
+            convList.map((c) => ({
+              ...c,
+              id: String(c.id || c._id),
+              _id: String(c._id || c.id),
+              messages: c.messages || [],
+            }))
+          );
+          setChats(sorted);
 
-    const importBackendHistory = async () => {
-      const storageKey = `campusgpt_chats_${userId}`;
-      const saved = localStorage.getItem(storageKey);
-      if (saved) {
-        try {
-          const parsed = JSON.parse(saved);
-          if (Array.isArray(parsed) && parsed.length > 0) return;
-        } catch (e) {}
-      }
+          // Restore previously active chat if valid, or select top conversation
+          const savedActiveId = localStorage.getItem(`campusgpt_active_chat_id_${userId}`);
+          const match = sorted.find((c) => matchId(c, savedActiveId));
+          const initialId = match ? match.id : sorted[0].id;
+          setActiveChatId(initialId);
 
-      const checkedKey = `campusgpt_checked_${userId}`;
-      if (sessionStorage.getItem(checkedKey)) return;
-      sessionStorage.setItem(checkedKey, 'true');
+          // Fetch full messages for initial active conversation
+          try {
+            const detailRes = await conversationAPI.get(initialId);
+            if (detailRes?.data?.messages) {
+              const formatted = detailRes.data.messages.map((m) => ({
+                id: String(m._id || m.id),
+                sender: m.role || m.sender,
+                text: m.content || m.text,
+                sources: m.sources || [],
+                suggestions: m.suggestions || [],
+                timestamp: m.timestamp || (m.createdAt ? new Date(m.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''),
+              }));
 
-      try {
-        const res = await chatAPI.getHistory();
-        if (res?.data?.messages && res.data.messages.length > 0) {
-          if (currentUserIdRef.current !== userId) return;
-
-          const formattedMessages = res.data.messages.map((m) => ({
-            id: m._id || `hist-${Date.now()}-${Math.random()}`,
-            sender: m.role,
-            text: m.content,
-            sources: m.sources || [],
-            timestamp: m.createdAt
-              ? new Date(m.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-              : 'Earlier',
-          }));
-
-          const firstUserMsg = formattedMessages.find((m) => m.sender === 'user');
-          const topicTitle = firstUserMsg ? extractTopicName(firstUserMsg.text) : 'Placement Policy';
-
-          const importedChat = {
-            id: `chat_${Date.now()}`,
-            title: topicTitle,
-            messages: formattedMessages,
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-          };
-
-          setChats([importedChat]);
-          setActiveChatId(importedChat.id);
+              setChats((prev) =>
+                prev.map((c) =>
+                  matchId(c, initialId) ? { ...c, messages: formatted } : c
+                )
+              );
+            }
+          } catch (e) {
+            console.warn('[ChatContext] Failed to load messages for initial active chat:', e);
+          }
+        } else {
+          setChats([]);
+          setActiveChatId(null);
         }
       } catch (err) {
-        // Non-blocking
+        console.warn('[ChatContext] Error loading conversations:', err);
+      } finally {
+        setIsLoadingChats(false);
       }
     };
 
-    importBackendHistory();
+    loadConversations();
   }, [userId]);
 
-  // Resolve current active chat
-  const activeChat = chats.find((c) => c.id === activeChatId) || null;
+  // Persist activeChatId
+  useEffect(() => {
+    if (!userId) return;
+    try {
+      const activeKey = `campusgpt_active_chat_id_${userId}`;
+      if (activeChatId && !activeChatId.startsWith('temp_')) {
+        localStorage.setItem(activeKey, activeChatId);
+      }
+    } catch (e) {}
+  }, [activeChatId, userId]);
+
+  // Resolve current active chat - 100% strictly matches the selected conversation
+  const activeChat = chats.find((c) => matchId(c, activeChatId)) || null;
   const activeMessages = activeChat ? activeChat.messages || [] : [];
 
   /**
-   * Start a brand new empty chat session (guarantees empty chat stream)
+   * Start a brand new empty chat session (isolated from all other chats)
    */
-  const createNewChat = () => {
-    const newId = `chat_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    setActiveChatId(newId);
-    if (userId) {
-      try {
-        localStorage.setItem(`campusgpt_active_chat_id_${userId}`, newId);
-      } catch (e) {}
-    }
-    return newId;
-  };
+  const createNewChat = useCallback(() => {
+    const tempId = `temp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    setActiveChatId(tempId);
+    return tempId;
+  }, []);
 
   /**
    * Switch to an existing chat from the sidebar
    */
-  const selectChat = (chatId) => {
-    setActiveChatId(chatId);
-    if (userId) {
+  const selectChat = useCallback(async (chatId) => {
+    if (!chatId) return;
+    const strId = String(chatId);
+    setActiveChatId(strId);
+
+    // Fetch conversation detail to ensure fresh and strictly isolated messages
+    if (!strId.startsWith('temp_')) {
       try {
-        localStorage.setItem(`campusgpt_active_chat_id_${userId}`, chatId);
-      } catch (e) {}
+        const res = await conversationAPI.get(strId);
+        if (res?.data?.messages) {
+          const formatted = res.data.messages.map((m) => ({
+            id: String(m._id || m.id),
+            sender: m.role || m.sender,
+            text: m.content || m.text,
+            sources: m.sources || [],
+            suggestions: m.suggestions || [],
+            timestamp: m.timestamp || (m.createdAt ? new Date(m.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''),
+          }));
+
+          setChats((prev) =>
+            prev.map((c) =>
+              matchId(c, strId) ? { ...c, messages: formatted } : c
+            )
+          );
+        }
+      } catch (e) {
+        console.warn('[ChatContext] Error fetching conversation detail:', e);
+      }
     }
-  };
+  }, []);
+
+  /**
+   * Toggle pinned state for a chat
+   */
+  const pinChat = useCallback(async (chatId) => {
+    const chat = chats.find((c) => matchId(c, chatId));
+    if (!chat) return;
+
+    const newPinned = !chat.pinned;
+    setChats((prev) =>
+      sortConversations(
+        prev.map((c) => (matchId(c, chatId) ? { ...c, pinned: newPinned } : c))
+      )
+    );
+
+    if (!String(chatId).startsWith('temp_')) {
+      try {
+        await conversationAPI.update(chatId, { pinned: newPinned });
+      } catch (err) {
+        console.warn('[ChatContext] Failed to update pinned status:', err);
+      }
+    }
+  }, [chats]);
 
   /**
    * Rename a chat session
    */
-  const renameChat = (chatId, newTitle) => {
+  const renameChat = useCallback(async (chatId, newTitle) => {
     if (!newTitle || !newTitle.trim()) return;
+    const cleanTitle = newTitle.trim();
+
     setChats((prev) =>
-      prev.map((c) =>
-        c.id === chatId ? { ...c, title: newTitle.trim(), updatedAt: Date.now() } : c
-      )
+      prev.map((c) => (matchId(c, chatId) ? { ...c, title: cleanTitle, updatedAt: new Date() } : c))
     );
-  };
+
+    if (!String(chatId).startsWith('temp_')) {
+      try {
+        await conversationAPI.update(chatId, { title: cleanTitle });
+      } catch (err) {
+        console.warn('[ChatContext] Failed to rename conversation:', err);
+      }
+    }
+  }, []);
 
   /**
    * Delete a chat session / folder
    */
-  const deleteChat = (chatId, e) => {
+  const deleteChat = useCallback(async (chatId, e) => {
     if (e && e.stopPropagation) {
       e.stopPropagation();
     }
-    setChats((prev) => prev.filter((c) => c.id !== chatId));
-    if (activeChatId === chatId) {
+
+    setChats((prev) => prev.filter((c) => !matchId(c, chatId)));
+
+    if (matchId({ id: activeChatId }, chatId)) {
       createNewChat();
     }
-  };
+
+    if (!String(chatId).startsWith('temp_')) {
+      try {
+        await conversationAPI.delete(chatId);
+      } catch (err) {
+        console.warn('[ChatContext] Failed to delete conversation:', err);
+      }
+    }
+  }, [activeChatId, createNewChat]);
 
   /**
-   * Add a user message to the active chat session (storing in a new folder named by the topic)
+   * Add a user message strictly to the active chat session
    */
-  const addMessageToActiveChat = (userMessage) => {
+  const addMessageToActiveChat = useCallback((userMessage) => {
     let currentId = activeChatId;
-    const exists = currentId && chats.some((c) => c.id === currentId);
+    const exists = currentId && chats.some((c) => matchId(c, currentId));
 
     if (!exists) {
-      currentId = currentId || `chat_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      currentId = currentId || `temp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
       setActiveChatId(currentId);
-      try {
-        localStorage.setItem(activeKey, currentId);
-      } catch (e) {}
 
-      // Name this new chat folder by the topic of the query
       const topicName = extractTopicName(userMessage.text);
-
       const newChat = {
         id: currentId,
+        _id: currentId,
+        tempId: currentId,
         title: topicName || 'Campus Inquiry',
+        pinned: false,
         messages: [userMessage],
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
+        createdAt: new Date(),
+        updatedAt: new Date(),
       };
 
       setChats((prev) => [newChat, ...prev]);
       return currentId;
     }
 
-    // Existing session
+    // Existing session: append message strictly to this session
     setChats((prev) =>
       prev.map((c) => {
-        if (c.id === currentId) {
+        if (matchId(c, currentId)) {
           return {
             ...c,
             messages: [...(c.messages || []), userMessage],
-            updatedAt: Date.now(),
+            updatedAt: new Date(),
           };
         }
         return c;
@@ -372,37 +380,37 @@ export const ChatProvider = ({ children }) => {
     );
 
     return currentId;
-  };
+  }, [activeChatId, chats]);
 
   /**
-   * Add assistant response to a chat session
+   * Add assistant response placeholder strictly to target chat session
    */
-  const addAssistantMessageToActiveChat = (assistantMessage, targetChatId) => {
+  const addAssistantMessageToActiveChat = useCallback((assistantMessage, targetChatId) => {
     const targetId = targetChatId || activeChatId;
     setChats((prev) =>
       prev.map((c) => {
-        if (c.id === targetId) {
+        if (matchId(c, targetId)) {
           return {
             ...c,
             messages: [...(c.messages || []), assistantMessage],
-            updatedAt: Date.now(),
+            updatedAt: new Date(),
           };
         }
         return c;
       })
     );
-  };
+  }, [activeChatId]);
 
   /**
-   * Update an existing message in a chat session (for SSE streaming chunks, status, sources)
+   * Update an existing message in a chat session (for SSE streaming chunks, status, sources, suggestions)
    */
-  const updateMessageInChat = (messageId, updater, targetChatId) => {
+  const updateMessageInChat = useCallback((messageId, updater, targetChatId) => {
     const targetId = targetChatId || activeChatId;
     setChats((prev) =>
       prev.map((c) => {
-        if (c.id === targetId) {
+        if (matchId(c, targetId)) {
           const updatedMessages = (c.messages || []).map((msg) => {
-            if (msg.id === messageId) {
+            if (String(msg.id) === String(messageId)) {
               return typeof updater === 'function' ? updater(msg) : { ...msg, ...updater };
             }
             return msg;
@@ -410,13 +418,42 @@ export const ChatProvider = ({ children }) => {
           return {
             ...c,
             messages: updatedMessages,
-            updatedAt: Date.now(),
+            updatedAt: new Date(),
           };
         }
         return c;
       })
     );
-  };
+  }, [activeChatId]);
+
+  /**
+   * Replace a temporary/draft chatId with the real backend conversation ID and update title
+   */
+  const setConversationSessionId = useCallback((oldId, newId, serverTitle) => {
+    if (!newId) return;
+    const strOld = String(oldId);
+    const strNew = String(newId);
+
+    setChats((prev) =>
+      sortConversations(
+        prev.map((c) => {
+          if (matchId(c, strOld)) {
+            return {
+              ...c,
+              id: strNew,
+              _id: strNew,
+              tempId: strOld, // preserve tempId reference so any pending tokens still match!
+              title: serverTitle || c.title,
+              updatedAt: new Date(),
+            };
+          }
+          return c;
+        })
+      )
+    );
+
+    setActiveChatId((curr) => (matchId({ id: curr }, strOld) ? strNew : curr));
+  }, []);
 
   return (
     <ChatContext.Provider
@@ -425,13 +462,16 @@ export const ChatProvider = ({ children }) => {
         activeChatId,
         activeChat,
         activeMessages,
+        isLoadingChats,
         createNewChat,
         selectChat,
         renameChat,
+        pinChat,
         deleteChat,
         addMessageToActiveChat,
         addAssistantMessageToActiveChat,
         updateMessageInChat,
+        setConversationSessionId,
       }}
     >
       {children}

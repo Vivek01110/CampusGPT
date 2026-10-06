@@ -1,9 +1,46 @@
+import mongoose from 'mongoose';
 import ChatMessage from '../models/ChatMessage.js';
+import Conversation from '../models/Conversation.js';
 import { routeQuery } from '../services/query/queryRouter.js';
 import { analyzeQuery } from '../services/query/queryAnalyzer.js';
 import { classifyIntent } from '../services/query/intentClassifier.js';
 import { answerQuestion } from '../services/rag/ragService.js';
 import { retrieveHybridContext } from '../services/retrieval/hybridRetriever.js';
+import { generateConversationTitle, deriveFallbackTitle } from '../services/ai/llmService.js';
+
+/**
+ * Resolve an existing conversation or create a new session
+ */
+const resolveOrCreateConversation = async (userId, conversationId, initialQuery) => {
+  if (conversationId && mongoose.isValidObjectId(conversationId)) {
+    const existing = await Conversation.findOne({ _id: conversationId, userId });
+    if (existing) return existing;
+  }
+  const initialTitle = deriveFallbackTitle(initialQuery);
+  return await Conversation.create({
+    userId,
+    title: initialTitle || 'Campus Inquiry',
+  });
+};
+
+/**
+ * Asynchronously generate short 2-4 word conversation title after the first turn
+ */
+const triggerAutoTitling = (convId, query, answer) => {
+  ChatMessage.countDocuments({ conversationId: convId })
+    .then((count) => {
+      if (count <= 2) {
+        return generateConversationTitle(query, answer).then(async (newTitle) => {
+          if (newTitle && newTitle.trim()) {
+            await Conversation.findByIdAndUpdate(convId, { title: newTitle.trim() });
+          }
+        });
+      }
+    })
+    .catch((err) => {
+      console.warn(`[Auto-Title Error] ${err.message}`);
+    });
+};
 
 /**
  * @desc    Submit user inquiry and receive grounded answer via Intelligent Query Router (Phase 6)
@@ -12,7 +49,7 @@ import { retrieveHybridContext } from '../services/retrieval/hybridRetriever.js'
  */
 export const sendMessage = async (req, res, next) => {
   try {
-    const { message, options } = req.body;
+    const { message, options, conversationId: bodyConvId } = req.body;
 
     if (!message || typeof message !== 'string' || !message.trim()) {
       return res.status(400).json({
@@ -22,37 +59,51 @@ export const sendMessage = async (req, res, next) => {
     }
 
     const trimmedQuery = message.trim();
+    const reqConversationId = bodyConvId || options?.conversationId || null;
+
+    // Resolve or create Conversation session thread
+    const conversation = await resolveOrCreateConversation(req.user._id, reqConversationId, trimmedQuery);
 
     // 1. Run Phase 6 Intelligent Query Routing pipeline (Clarification, Structured, Document Search, Hybrid, or RAG)
     const routeResult = await routeQuery(trimmedQuery, req.user, options || {});
 
-    // 2. Persist single-question conversation in MongoDB
+    // 2. Persist message turn in MongoDB under conversationId
     try {
-      // User message
       await ChatMessage.create({
         userId: req.user._id,
+        conversationId: conversation._id,
         role: 'user',
         content: trimmedQuery,
         sources: [],
       });
 
-      // Assistant message
       await ChatMessage.create({
         userId: req.user._id,
+        conversationId: conversation._id,
         role: 'assistant',
         content: routeResult.answer,
         sources: routeResult.sources || [],
+        suggestions: routeResult.suggestions || [],
       });
+
+      conversation.updatedAt = new Date();
+      await conversation.save();
+
+      // Trigger automatic title generation after the first turn
+      triggerAutoTitling(conversation._id, trimmedQuery, routeResult.answer);
     } catch (dbErr) {
       console.warn(`[Chat History Warning] Failed to log chat message: ${dbErr.message}`);
     }
 
-    // 3. Return grounded answer, citations, structured payload, and routing metadata
+    // 3. Return grounded answer, citations, suggestions, structured payload, and routing metadata
     return res.status(200).json({
       success: true,
       message: 'Assistant response generated successfully.',
       data: {
+        conversationId: conversation._id,
+        conversationTitle: conversation.title,
         answer: routeResult.answer,
+        suggestions: routeResult.suggestions || [],
         queryType: routeResult.queryType || 'rag',
         intent: routeResult.intent || 'policy_question',
         coverage: routeResult.coverage || 'FULL',
@@ -78,15 +129,36 @@ export const sendMessage = async (req, res, next) => {
  */
 export const getChatHistory = async (req, res, next) => {
   try {
-    const recentMessages = await ChatMessage.find({ userId: req.user._id })
+    const { conversationId } = req.query;
+    const filter = { userId: req.user._id };
+
+    if (conversationId && mongoose.isValidObjectId(conversationId)) {
+      filter.conversationId = conversationId;
+    }
+
+    const recentMessages = await ChatMessage.find(filter)
       .sort({ createdAt: -1 })
-      .limit(50);
+      .limit(100);
 
     return res.status(200).json({
       success: true,
       message: 'Chat history retrieved.',
       data: {
-        messages: recentMessages.reverse(),
+        messages: recentMessages.reverse().map((m) => ({
+          id: m._id,
+          _id: m._id,
+          conversationId: m.conversationId,
+          role: m.role,
+          sender: m.role,
+          content: m.content,
+          text: m.content,
+          sources: m.sources || [],
+          suggestions: m.suggestions || [],
+          createdAt: m.createdAt,
+          timestamp: m.createdAt
+            ? new Date(m.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            : '',
+        })),
       },
     });
   } catch (error) {
@@ -156,7 +228,7 @@ export const debugRetrieval = async (req, res, next) => {
  * @access  Private (Authenticated users)
  */
 export const sendMessageStream = async (req, res, next) => {
-  const { message, options } = req.body;
+  const { message, options, conversationId: bodyConvId } = req.body;
 
   if (!message || typeof message !== 'string' || !message.trim()) {
     return res.status(400).json({
@@ -166,6 +238,10 @@ export const sendMessageStream = async (req, res, next) => {
   }
 
   const trimmedQuery = message.trim();
+  const reqConversationId = bodyConvId || options?.conversationId || null;
+
+  // Resolve or create Conversation session thread
+  const conversation = await resolveOrCreateConversation(req.user._id, reqConversationId, trimmedQuery);
 
   // Set SSE Headers
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
@@ -186,8 +262,12 @@ export const sendMessageStream = async (req, res, next) => {
     }
   };
 
-  // 1. Initial connection event
-  sendEvent('connected', { timestamp: Date.now() });
+  // 1. Initial connection event with conversation metadata
+  sendEvent('connected', {
+    timestamp: Date.now(),
+    conversationId: conversation._id,
+    conversationTitle: conversation.title,
+  });
 
   try {
     // 2. Call Intelligent Query Routing with live SSE callbacks
@@ -198,7 +278,11 @@ export const sendMessageStream = async (req, res, next) => {
           sendEvent('status', { message: statusMsg });
         },
         onMetadata: (meta) => {
-          sendEvent('metadata', meta);
+          sendEvent('metadata', {
+            ...meta,
+            conversationId: conversation._id,
+            conversationTitle: conversation.title,
+          });
         },
         onSources: (sourcesList) => {
           sendEvent('sources', { sources: sourcesList });
@@ -209,10 +293,11 @@ export const sendMessageStream = async (req, res, next) => {
       },
     });
 
-    // 3. Persist conversation in MongoDB regardless of whether client disconnected
+    // 3. Persist conversation in MongoDB under conversationId
     try {
       await ChatMessage.create({
         userId: req.user._id,
+        conversationId: conversation._id,
         role: 'user',
         content: trimmedQuery,
         sources: [],
@@ -220,17 +305,28 @@ export const sendMessageStream = async (req, res, next) => {
 
       await ChatMessage.create({
         userId: req.user._id,
+        conversationId: conversation._id,
         role: 'assistant',
         content: routeResult.answer,
         sources: routeResult.sources || [],
+        suggestions: routeResult.suggestions || [],
       });
+
+      conversation.updatedAt = new Date();
+      await conversation.save();
+
+      // Trigger automatic title generation after the first turn
+      triggerAutoTitling(conversation._id, trimmedQuery, routeResult.answer);
     } catch (dbErr) {
       console.warn(`[Chat History Warning] Failed to log chat message: ${dbErr.message}`);
     }
 
-    // 4. Send final completion event
+    // 4. Send final completion event with suggestions and conversationId
     sendEvent('done', {
+      conversationId: conversation._id,
+      conversationTitle: conversation.title,
       answer: routeResult.answer,
+      suggestions: routeResult.suggestions || [],
       queryType: routeResult.queryType || 'rag',
       intent: routeResult.intent || 'policy_question',
       coverage: routeResult.coverage || 'FULL',

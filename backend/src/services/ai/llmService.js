@@ -23,7 +23,12 @@ class StreamingTokenFilter {
     if (!this.onToken || this.stopped || !chunk) return;
     this.buffer += chunk;
 
-    const markerIndex = this.buffer.indexOf('[USED_SOURCES');
+    const usedIdx = this.buffer.indexOf('[USED_SOURCES');
+    const sugIdx = this.buffer.indexOf('[SUGGESTIONS');
+    const markerIndex = (usedIdx !== -1 && sugIdx !== -1)
+      ? Math.min(usedIdx, sugIdx)
+      : (usedIdx !== -1 ? usedIdx : sugIdx);
+
     if (markerIndex !== -1) {
       // Emit everything prior to the marker
       const toEmit = this.buffer.slice(0, markerIndex);
@@ -35,7 +40,7 @@ class StreamingTokenFilter {
       return;
     }
 
-    // Hold back the trailing 20 characters in case [USED_SOURCES is partially split across chunks
+    // Hold back the trailing 20 characters in case tag is partially split across chunks
     if (this.buffer.length > 25) {
       const safeLength = this.buffer.length - 20;
       const toEmit = this.buffer.slice(0, safeLength);
@@ -47,7 +52,12 @@ class StreamingTokenFilter {
   flush() {
     if (!this.onToken || this.stopped) return;
     if (this.buffer.length > 0) {
-      const markerIndex = this.buffer.indexOf('[USED_SOURCES');
+      const usedIdx = this.buffer.indexOf('[USED_SOURCES');
+      const sugIdx = this.buffer.indexOf('[SUGGESTIONS');
+      const markerIndex = (usedIdx !== -1 && sugIdx !== -1)
+        ? Math.min(usedIdx, sugIdx)
+        : (usedIdx !== -1 ? usedIdx : sugIdx);
+
       const toEmit = markerIndex !== -1 ? this.buffer.slice(0, markerIndex) : this.buffer;
       if (toEmit) {
         this.onToken(toEmit);
@@ -213,7 +223,15 @@ STRICT GROUNDING & RETRIEVAL RULES:
    - At the VERY END of your response, on a final new line, write which Source numbers you actually retrieved information from:
      [USED_SOURCES: 1, 2]
    - If the provided Context does NOT contain information to answer the question, or if you could not find the requested information, state clearly that you couldn't find this information in the official documents, and write:
-     [USED_SOURCES: NONE]`;
+     [USED_SOURCES: NONE]
+9. Dynamic Follow-Up Suggestions (Smart Follow-Up Chips):
+   - At the VERY END of your response, on the line directly after [USED_SOURCES: ...], provide 2 to 3 contextual, clickable follow-up questions that a student might logically ask next.
+   - Format on a single line strictly as:
+     [SUGGESTIONS: "Follow up question 1?", "Follow up question 2?", "Follow up question 3?"]
+   - Examples:
+     * After attendance rules: [SUGGESTIONS: "How does medical leave condonation work?", "What are the detention consequences for end sem?"]
+     * After syllabus or PYQs: [SUGGESTIONS: "What is the DBMS course syllabus & credit breakdown?", "Do you have Computer Networks PYQs for 5th sem too?"]
+     * After placement policy: [SUGGESTIONS: "What is the CGPA cutoff for tier-1 companies?", "Can unplaced students apply for off-campus internships?"]`;
 
   const promptText = `CONTEXT FROM OFFICIAL UNIVERSITY DOCUMENTS:
 ${contextBlock || 'NO MATCHING CONTEXT FOUND.'}
@@ -275,12 +293,18 @@ GROUNDED ANSWER:`;
             }
           }
 
-          const cleanAnswer = rawReply.replace(/\n*\[USED_SOURCES:[^\]]*\]/gi, '').trim();
+          const suggestions = parseSuggestionsFromReply(rawReply);
+
+          const cleanAnswer = rawReply
+            .replace(/\n*\[USED_SOURCES:[^\]]*\]/gi, '')
+            .replace(/\n*\[SUGGESTIONS:[^\]]*\]/gi, '')
+            .trim();
 
           // Return string object with attached metadata for 100% backward compatibility
           const result = new String(cleanAnswer);
           result.answer = cleanAnswer;
           result.usedSourceIndices = usedSourceIndices;
+          result.suggestions = suggestions;
           return result;
         }
       } catch (err) {
@@ -329,7 +353,9 @@ Formatting Guidelines:
 - For coding, algorithms, or technical definitions, provide well-commented code snippets in fenced code blocks.
 - For mathematics or theory, use LaTeX notation ($inline$, $$block$$).
 - Use bullet points or numbered steps for explanations and comparisons.
-- Be concise, educational, and helpful.`;
+- Be concise, educational, and helpful.
+- At the VERY END of your answer, on a final line, suggest 2 to 3 concise, clickable follow-up questions:
+  [SUGGESTIONS: "Follow-up question 1?", "Follow-up question 2?"]`;
 
   const configuredModel = process.env.LLM_MODEL || 'gemini-3.5-flash-lite';
   const modelsToTry = [
@@ -359,12 +385,24 @@ Formatting Guidelines:
           },
         };
 
+        const tokenFilter = new StreamingTokenFilter(onToken);
+
         const rawReply = await streamGeminiContent(streamUrl, payload, (chunk) => {
-          if (onToken) onToken(chunk);
+          tokenFilter.push(chunk);
         });
 
+        tokenFilter.flush();
+
         if (rawReply) {
-          return rawReply.trim();
+          const suggestions = parseSuggestionsFromReply(rawReply);
+          const cleanAnswer = rawReply
+            .replace(/\n*\[SUGGESTIONS:[^\]]*\]/gi, '')
+            .trim();
+
+          const result = new String(cleanAnswer);
+          result.answer = cleanAnswer;
+          result.suggestions = suggestions;
+          return result;
         }
       } catch (err) {
         lastError = err;
@@ -385,9 +423,134 @@ export const generateGeneralAnswer = async (question, systemContext = '') => {
   return generateGeneralAnswerStream(question, { systemContext });
 };
 
+/**
+ * Helper to parse [SUGGESTIONS: ...] from LLM response text
+ */
+export const parseSuggestionsFromReply = (rawReply) => {
+  if (!rawReply || typeof rawReply !== 'string') return [];
+  const sugMatch = rawReply.match(/\[SUGGESTIONS:\s*(\[.*?\]|.+?)\]/is);
+  if (!sugMatch) return [];
+
+  const content = sugMatch[1].trim();
+  try {
+    if (content.startsWith('[') && content.endsWith(']')) {
+      const parsed = JSON.parse(content);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .map((s) => (typeof s === 'string' ? s.trim() : ''))
+          .filter((s) => s.length > 3)
+          .slice(0, 3);
+      }
+    }
+  } catch {}
+
+  const matches = content.match(/"([^"]+)"|'([^']+)'/g);
+  if (matches && matches.length > 0) {
+    return matches
+      .map((s) => s.replace(/^["']|["']$/g, '').trim())
+      .filter((s) => s.length > 3)
+      .slice(0, 3);
+  }
+
+  return content
+    .split(',')
+    .map((s) => s.trim().replace(/^["']|["']$/g, ''))
+    .filter((s) => s.length > 3)
+    .slice(0, 3);
+};
+
+/**
+ * Derive clean heuristic title from user inquiry
+ */
+export const deriveFallbackTitle = (query) => {
+  if (!query || typeof query !== 'string') return 'Campus Inquiry';
+  const cleaned = query
+    .replace(/[?.,!/\\#@$%^&*()_+={}\[\]<>:;~`|"]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const words = cleaned.split(' ').filter((w) => w.length > 1);
+  if (words.length === 0) return 'Campus Inquiry';
+  const prefixDrop = /^(can|could|please|give|tell|what|when|where|how|who|why|is|are|the|show|explain)$/i;
+  const filtered = words.filter((w) => !prefixDrop.test(w));
+  const finalWords = filtered.length > 0 ? filtered.slice(0, 4) : words.slice(0, 4);
+  return finalWords.map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
+};
+
+/**
+ * Automatically generate short 2-4 word conversation title using Gemini
+ */
+export const generateConversationTitle = async (userQuery, assistantAnswer = '') => {
+  if (!userQuery || !userQuery.trim()) {
+    return 'Campus Inquiry';
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return deriveFallbackTitle(userQuery);
+  }
+
+  try {
+    const prompt = `You are a concise title generator for a university student chat assistant.
+Generate a short, descriptive 2 to 4 word topic title for the conversation that begins with the inquiry below.
+Rules:
+- 2 to 4 words maximum.
+- Title Case.
+- Do NOT use punctuation, quotes, or markdown.
+- Do NOT use generic words like "Chat", "Query", "Question", "Inquiry", or "Conversation".
+- Capture the specific university subject, policy, or exam topic.
+
+Examples:
+- "What are the attendance rules for 6th sem?" -> Attendance Regulations
+- "DBMS mid sem PYQs 2024" -> DBMS Exam Prep
+- "How does minor degree registration work?" -> Minor Degree Guidelines
+- "Placement eligibility criteria for CSE" -> Placement Policy Queries
+- "Hostel curfew timings and mess rules" -> Hostel Rules & Timings
+
+User Inquiry: "${userQuery.slice(0, 300)}"
+Topic Title:`;
+
+    const model = process.env.LLM_MODEL || 'gemini-3.5-flash-lite';
+    const url = `${GEMINI_API_BASE}/models/${model}:generateContent?key=${apiKey}`;
+
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 25,
+        },
+      }),
+      signal: AbortSignal.timeout(6000),
+    });
+
+    if (resp.ok) {
+      const data = await resp.json();
+      const rawTitle = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (rawTitle) {
+        const cleaned = rawTitle
+          .replace(/["'*#_:`]/g, '')
+          .replace(/\n/g, ' ')
+          .trim();
+        if (cleaned && cleaned.length >= 3 && cleaned.length <= 60) {
+          return cleaned;
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`[Title Generation] Fallback used: ${err.message}`);
+  }
+
+  return deriveFallbackTitle(userQuery);
+};
+
 export default {
   generateAnswer,
   generateAnswerStream,
   generateGeneralAnswer,
   generateGeneralAnswerStream,
+  generateConversationTitle,
+  deriveFallbackTitle,
+  parseSuggestionsFromReply,
 };

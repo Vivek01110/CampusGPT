@@ -303,10 +303,13 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
   if (understanding.queryType === 'general') {
     console.log(`[QUERY ROUTER] Routing to Gemini General Knowledge (no campus RAG): "${query}"`);
     callbacks.onStatus?.('Generating academic response...');
-    const generalAnswer = await generateGeneralAnswerStream(query, { onToken: callbacks.onToken });
+    const generalResult = await generateGeneralAnswerStream(query, { onToken: callbacks.onToken });
+    const answerText = (generalResult && generalResult.answer) ? generalResult.answer : String(generalResult);
+    const suggestions = (generalResult && generalResult.suggestions) ? generalResult.suggestions : [];
 
     return {
-      answer: generalAnswer,
+      answer: answerText,
+      suggestions,
       queryType: 'general',
       intent: understanding.intent || 'GENERAL_KNOWLEDGE',
       coverage: 'FULL',
@@ -448,8 +451,16 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
       callbacks.onSources?.(sources);
       callbacks.onToken?.(formattedDocs);
 
+      const subj = resolvedEntities.subject || 'this course';
+      const pyqSuggestions = [
+        `What is the ${subj} course syllabus & credit breakdown?`,
+        `Do you have previous year papers for other semesters?`,
+        `What are the recommended reference books for ${subj}?`,
+      ];
+
       return {
         answer: formattedDocs,
+        suggestions: pyqSuggestions,
         queryType: 'document_search',
         intent: 'PYQ_SEARCH',
         sources,
@@ -498,8 +509,16 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
       const formattedText = formatCoursesResponse(courses, query);
       callbacks.onToken?.(formattedText);
 
+      const code = courses[0]?.code || 'this subject';
+      const courseSuggestions = [
+        `What are the prerequisites for ${code}?`,
+        `Are previous year question papers available for ${code}?`,
+        `What are the minimum credit requirements for this semester?`,
+      ];
+
       return {
         answer: formattedText,
+        suggestions: courseSuggestions,
         queryType: 'structured',
         intent: understanding.intent,
         sources: [],

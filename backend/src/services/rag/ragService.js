@@ -216,6 +216,7 @@ export const answerQuestion = async (question, options = {}) => {
       return {
         answer: exactResult.answer,
         sources: exactResult.sources || [],
+        suggestions: exactResult.suggestions || [],
         retrievedCount: (exactResult.sources || []).length,
         coverage: exactResult.coverage || 'FULL',
         requestedFields: exactResult.requestedFields || [],
@@ -250,6 +251,7 @@ export const answerQuestion = async (question, options = {}) => {
       return {
         answer: semanticResult.answer,
         sources: semanticResult.sources || [],
+        suggestions: semanticResult.suggestions || [],
         retrievedCount: (semanticResult.sources || []).length,
         coverage: semanticResult.coverage || 'FULL',
         requestedFields: semanticResult.requestedFields || [],
@@ -379,7 +381,8 @@ export const answerQuestion = async (question, options = {}) => {
   });
   const answer = (genResult && genResult.answer) ? genResult.answer : String(genResult);
   const usedIndices = (genResult && genResult.usedSourceIndices) ? genResult.usedSourceIndices : [];
-  console.log(`[RAG] Grounded answer generated successfully. Used source indices: [${usedIndices.join(', ')}]`);
+  const suggestions = (genResult && genResult.suggestions && Array.isArray(genResult.suggestions)) ? genResult.suggestions : [];
+  console.log(`[RAG] Grounded answer generated successfully. Used source indices: [${usedIndices.join(', ')}], Suggestions: [${suggestions.join(', ')}]`);
 
   // Determine if the answer is negative, unverified, or failed to retrieve information from documents
   const lowerAnswer = answer.toLowerCase();
@@ -434,6 +437,7 @@ export const answerQuestion = async (question, options = {}) => {
     const cachePayload = {
       answer,
       sources,
+      suggestions,
       coverage: coverageReport.coverage,
       requestedFields: coverageReport.requestedFields,
       supportedFields: coverageReport.supportedFields,
@@ -462,6 +466,7 @@ export const answerQuestion = async (question, options = {}) => {
   return {
     answer,
     sources,
+    suggestions,
     retrievedCount: retrievedChunks.length,
     coverage: coverageReport.coverage,
     requestedFields: coverageReport.requestedFields,

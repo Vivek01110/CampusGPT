@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -164,6 +164,7 @@ const Assistant = ({ onOpenMobileNav }) => {
     addMessageToActiveChat,
     addAssistantMessageToActiveChat,
     updateMessageInChat,
+    setConversationSessionId,
   } = useChat();
   const location = useLocation();
   const navigate = useNavigate();
@@ -173,18 +174,45 @@ const Assistant = ({ onOpenMobileNav }) => {
   const [showMenu, setShowMenu] = useState(false);
   const [copiedMsgId, setCopiedMsgId] = useState(null);
 
-  const messagesEndRef = useRef(null);
+  const scrollContainerRef = useRef(null);
+  const isUserScrolledUpRef = useRef(false);
+  const scrollRafRef = useRef(null);
   const textareaRef = useRef(null);
   const menuRef = useRef(null);
   const abortControllerRef = useRef(null);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
+  // Monitor user scrolling: if user intentionally scrolls up, pause auto-scroll
+  const handleScroll = useCallback(() => {
+    if (!scrollContainerRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = scrollContainerRef.current;
+    const distanceFromBottom = scrollHeight - (scrollTop + clientHeight);
+    isUserScrolledUpRef.current = distanceFromBottom > 120;
+  }, []);
+
+  // Vibration-free instant container scroll
+  const scrollToBottom = useCallback((force = false) => {
+    if (!scrollContainerRef.current) return;
+    if (!force && isUserScrolledUpRef.current) return;
+
+    if (scrollRafRef.current) {
+      cancelAnimationFrame(scrollRafRef.current);
+    }
+
+    scrollRafRef.current = requestAnimationFrame(() => {
+      if (scrollContainerRef.current) {
+        scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+      }
+    });
+  }, []);
 
   useEffect(() => {
     scrollToBottom();
-  }, [activeMessages, isTyping]);
+    return () => {
+      if (scrollRafRef.current) {
+        cancelAnimationFrame(scrollRafRef.current);
+      }
+    };
+  }, [activeMessages, isTyping, scrollToBottom]);
 
   // Clean up streaming connection on unmount
   useEffect(() => {
@@ -263,11 +291,15 @@ const Assistant = ({ onOpenMobileNav }) => {
 
     // Save message into active chat session
     const targetChatId = addMessageToActiveChat(userMsg);
+    let sessionChatId = targetChatId;
+
     setInputValue('');
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
     setIsTyping(true);
+    isUserScrolledUpRef.current = false;
+    scrollToBottom(true);
 
     const assistantMsgId = `asst-${Date.now()}`;
     const initialAssistantMsg = {
@@ -283,20 +315,32 @@ const Assistant = ({ onOpenMobileNav }) => {
 
     addAssistantMessageToActiveChat(initialAssistantMsg, targetChatId);
 
+    const convIdToSend = targetChatId && !targetChatId.startsWith('temp_') ? targetChatId : null;
+
     try {
       await chatAPI.streamMessage(
         query,
-        {},
+        { conversationId: convIdToSend },
         {
-          onConnected: () => {
+          onConnected: (data) => {
+            if (data?.conversationId) {
+              setConversationSessionId(sessionChatId, data.conversationId, data.conversationTitle);
+              sessionChatId = data.conversationId;
+            }
             updateMessageInChat(
               assistantMsgId,
               (prev) => ({
                 ...prev,
                 status: prev.status || 'Searching official documents...',
               }),
-              targetChatId
+              sessionChatId
             );
+          },
+          onMetadata: (meta) => {
+            if (meta?.conversationId) {
+              setConversationSessionId(sessionChatId, meta.conversationId, meta.conversationTitle);
+              sessionChatId = meta.conversationId;
+            }
           },
           onStatus: (statusMsg) => {
             updateMessageInChat(
@@ -305,7 +349,7 @@ const Assistant = ({ onOpenMobileNav }) => {
                 ...prev,
                 status: statusMsg,
               }),
-              targetChatId
+              sessionChatId
             );
           },
           onSources: (retrievedSources) => {
@@ -315,7 +359,7 @@ const Assistant = ({ onOpenMobileNav }) => {
                 ...prev,
                 sources: retrievedSources && retrievedSources.length > 0 ? retrievedSources : prev.sources,
               }),
-              targetChatId
+              sessionChatId
             );
           },
           onToken: (tokenChunk) => {
@@ -326,21 +370,26 @@ const Assistant = ({ onOpenMobileNav }) => {
                 text: (prev.text || '') + tokenChunk,
                 status: null, // Clear status chip once tokens start arriving
               }),
-              targetChatId
+              sessionChatId
             );
           },
           onDone: (doneData) => {
+            if (doneData?.conversationId) {
+              setConversationSessionId(sessionChatId, doneData.conversationId, doneData.conversationTitle);
+              sessionChatId = doneData.conversationId;
+            }
             updateMessageInChat(
               assistantMsgId,
               (prev) => ({
                 ...prev,
                 text: doneData.answer || prev.text,
                 sources: (doneData.sources && doneData.sources.length > 0) ? doneData.sources : prev.sources,
+                suggestions: (doneData.suggestions && doneData.suggestions.length > 0) ? doneData.suggestions : (prev.suggestions || []),
                 clarification: doneData.clarification || prev.clarification || null,
                 status: null,
                 isStreaming: false,
               }),
-              targetChatId
+              sessionChatId
             );
           },
           onError: (errData) => {
@@ -354,7 +403,7 @@ const Assistant = ({ onOpenMobileNav }) => {
                 status: null,
                 isStreaming: false,
               }),
-              targetChatId
+              sessionChatId
             );
           },
         },
@@ -381,7 +430,7 @@ const Assistant = ({ onOpenMobileNav }) => {
           status: null,
           isStreaming: false,
         }),
-        targetChatId
+        sessionChatId
       );
     } finally {
       setIsTyping(false);
@@ -502,7 +551,11 @@ const Assistant = ({ onOpenMobileNav }) => {
       </header>
 
       {/* Main Conversation Stream */}
-      <div className="flex-1 overflow-y-auto px-3 sm:px-6 py-4 sm:py-6">
+      <div
+        ref={scrollContainerRef}
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto px-3 sm:px-6 py-4 sm:py-6 overscroll-contain"
+      >
         <div className="max-w-3xl mx-auto w-full">
           {/* Empty State / Welcome Hero */}
           {activeMessages.length === 0 ? (
@@ -555,8 +608,8 @@ const Assistant = ({ onOpenMobileNav }) => {
                 ) : (
                   /* Assistant Message: ChatGPT Mobile Style — Full width, edge-to-edge typography, no cramped bubble */
                   <div key={msg.id} className="w-full my-3 sm:my-5 space-y-2.5">
-                    {/* Live Status Pill when searching/retrieving */}
-                    {msg.status && (
+                    {/* Live Status Pill when searching/retrieving (only before text arrives to avoid layout pop) */}
+                    {msg.status && !msg.text && (
                       <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-zinc-800/80 border border-zinc-700/60 text-xs text-zinc-300">
                         <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" />
                         <span className="text-xs text-zinc-300 font-medium">{msg.status}</span>
@@ -568,7 +621,7 @@ const Assistant = ({ onOpenMobileNav }) => {
                       <div className="w-full text-zinc-100 text-sm sm:text-[15px] leading-relaxed select-text space-y-3">
                         <ReactMarkdown
                           remarkPlugins={[remarkGfm, remarkMath]}
-                          rehypePlugins={[rehypeKatex]}
+                          rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }]]}
                           components={{
                             h1: ({ children }) => (
                               <h1 className="text-lg sm:text-xl font-bold text-white mt-5 mb-2 tracking-tight first:mt-0 pb-1 border-b border-campus-border/40">
@@ -813,6 +866,30 @@ const Assistant = ({ onOpenMobileNav }) => {
                         </div>
                       </details>
                     )}
+
+                    {/* Dynamic Smart Follow-Up Chips */}
+                    {!msg.isStreaming && msg.suggestions && msg.suggestions.length > 0 && (
+                      <div className="mt-3 pt-2.5 border-t border-campus-border/40">
+                        <div className="flex items-center gap-1.5 text-[11px] font-medium text-campus-muted mb-2">
+                          <Sparkles className="w-3 h-3 text-blue-400" />
+                          <span>Suggested Follow-ups</span>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {msg.suggestions.map((sug, sIdx) => (
+                            <button
+                              key={sIdx}
+                              type="button"
+                              disabled={isTyping}
+                              onClick={() => handleSendMessage(sug)}
+                              className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-normal text-zinc-200 bg-campus-card/90 hover:bg-zinc-800 hover:text-white border border-campus-border hover:border-blue-500/60 transition-all duration-150 cursor-pointer shadow-sm text-left group disabled:opacity-50"
+                            >
+                              <span className="w-1.5 h-1.5 rounded-full bg-blue-400 group-hover:scale-125 transition-transform flex-shrink-0" />
+                              <span>{sug}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -828,8 +905,6 @@ const Assistant = ({ onOpenMobileNav }) => {
                   </div>
                 </div>
               )}
-
-              <div ref={messagesEndRef} />
             </div>
           )}
         </div>

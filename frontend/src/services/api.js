@@ -128,15 +128,70 @@ export const documentAPI = {
     }),
 };
 
+export const conversationAPI = {
+  /**
+   * List all conversation threads for current user
+   */
+  list: () =>
+    request('/conversations', {
+      method: 'GET',
+    }),
+
+  /**
+   * Create a new conversation thread
+   * @param {{ title?: string, pinned?: boolean, summary?: string, tags?: string[] }} data
+   */
+  create: (data = {}) =>
+    request('/conversations', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  /**
+   * Get conversation details and associated messages
+   * @param {string} id
+   */
+  get: (id) =>
+    request(`/conversations/${id}`, {
+      method: 'GET',
+    }),
+
+  /**
+   * Update conversation (rename, toggle pin, update summary)
+   * @param {string} id
+   * @param {{ title?: string, pinned?: boolean, summary?: string, tags?: string[] }} data
+   */
+  update: (id, data = {}) =>
+    request(`/conversations/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+
+  /**
+   * Delete conversation and all its messages
+   * @param {string} id
+   */
+  delete: (id) =>
+    request(`/conversations/${id}`, {
+      method: 'DELETE',
+    }),
+};
+
 export const chatAPI = {
   /**
    * Submit student query to RAG assistant
    * @param {string} message
+   * @param {object} options
+   * @param {string} [conversationId]
    */
-  sendMessage: (message) =>
+  sendMessage: (message, options = {}, conversationId = null) =>
     request('/chat', {
       method: 'POST',
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({
+        message,
+        options,
+        conversationId: conversationId || options?.conversationId || null,
+      }),
     }),
 
   /**
@@ -156,12 +211,18 @@ export const chatAPI = {
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     };
 
+    const conversationId = options?.conversationId || null;
+
     let response;
     try {
       response = await fetch(url, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ message, options }),
+        body: JSON.stringify({
+          message,
+          options,
+          conversationId,
+        }),
         signal,
       });
     } catch (err) {
