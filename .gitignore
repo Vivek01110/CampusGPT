@@ -64,3 +64,8 @@ doc/
 # NPM local config
 .npmrc
 **/.npmrc
+
+.md
+*.md
+*.txt
+
