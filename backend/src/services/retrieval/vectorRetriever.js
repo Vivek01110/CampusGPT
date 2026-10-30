@@ -70,8 +70,11 @@ export const retrieveVectorCandidates = async (query, options = {}) => {
   const scoreThreshold = options.scoreThreshold ?? parseFloat(process.env.RAG_MIN_SCORE || '0.35');
 
   try {
-    // 1. Generate dense query embedding
-    const queryVector = await generateEmbedding(cleanQuery);
+    // 1. Generate dense query embedding (reuse precomputed vector if provided)
+    const queryVector =
+      options.precomputedVector && Array.isArray(options.precomputedVector) && options.precomputedVector.length > 0
+        ? options.precomputedVector
+        : await generateEmbedding(cleanQuery);
 
     // 2. Build optional filter
     let qdrantFilter = options.filter || null;

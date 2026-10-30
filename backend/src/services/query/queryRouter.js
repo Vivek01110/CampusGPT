@@ -4,6 +4,9 @@ import courseService from '../courses/courseService.js';
 import documentSearchService from '../documents/documentSearchService.js';
 import { answerQuestion } from '../rag/ragService.js';
 import { generateGeneralAnswerStream } from '../ai/llmService.js';
+import { generateEmbedding } from '../ai/embeddingService.js';
+import exactQueryCache from '../cache/exactQueryCache.js';
+import cacheInvalidation from '../cache/cacheInvalidation.js';
 import User from '../../models/User.js';
 import ChatMessage from '../../models/ChatMessage.js';
 
@@ -116,8 +119,83 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
 
   const query = rawQuery.trim();
 
+  const callbacks = options.callbacks || {};
+
   // --------------------------------------------------------------------------
-  // STEP 1: Check for Explicit User Profile Update Requests
+  // STEP 1: Fast Conversational Greeting Short-Circuit (Zero Latency)
+  // --------------------------------------------------------------------------
+  if (/^(hi|hello|hey|good morning|good afternoon|good evening|thanks|thank you|who are you|what can you do|what are you)\b/i.test(query)) {
+    let chatAnswer = "Hello! I'm CampusGPT, your official NIT Kurukshetra campus assistant. How can I help you with courses, exams, campus regulations, or previous year papers today?";
+    const lowerQuery = query.toLowerCase();
+    if (/thank/i.test(lowerQuery)) {
+      chatAnswer = "You're welcome! Let me know if you need any other official regulations, syllabus details, or question papers.";
+    } else if (/who are you|what can you do|what are you/i.test(lowerQuery)) {
+      chatAnswer = "I'm CampusGPT, an intelligent assistant for NIT Kurukshetra. I can help you with official academic ordinances, attendance regulations, examination schedules, previous year question papers (PYQs), placement policies, and syllabus details.";
+    }
+
+    callbacks.onMetadata?.({
+      queryType: 'chat',
+      intent: 'GENERAL_CHAT',
+      resolvedEntities: {},
+    });
+    callbacks.onToken?.(chatAnswer);
+
+    return {
+      answer: chatAnswer,
+      queryType: 'chat',
+      intent: 'GENERAL_CHAT',
+      coverage: 'FULL',
+      sources: [],
+      structuredData: null,
+      clarification: null,
+      retrieval: { strategy: 'conversational_response', cached: false },
+    };
+  }
+
+  // --------------------------------------------------------------------------
+  // STEP 2: Early Exact Query Cache Check (< 5ms)
+  // --------------------------------------------------------------------------
+  if (!options.bypassCache) {
+    try {
+      const version = await cacheInvalidation.getCacheVersion();
+      const isPublic = options.isPublic !== false && !user?.isPrivateQuery;
+      const exactResult = await exactQueryCache.get({
+        query,
+        user,
+        version,
+        isPublic,
+      });
+
+      if (exactResult) {
+        callbacks.onStatus?.('Found verified answer in campus records');
+        callbacks.onMetadata?.({
+          queryType: 'rag',
+          intent: 'OFFICIAL_REGULATION',
+          resolvedEntities: {},
+        });
+        callbacks.onSources?.(exactResult.sources || []);
+        callbacks.onToken?.(exactResult.answer);
+
+        return {
+          answer: exactResult.answer,
+          sources: exactResult.sources || [],
+          suggestions: exactResult.suggestions || [],
+          retrievedCount: (exactResult.sources || []).length,
+          coverage: exactResult.coverage || 'FULL',
+          queryType: 'rag',
+          intent: 'OFFICIAL_REGULATION',
+          structuredData: null,
+          clarification: null,
+          retrieval: { strategy: 'exact_cache_early', cached: true },
+        };
+      }
+    } catch (cacheErr) {
+      console.warn(`[QUERY ROUTER] Early cache check error: ${cacheErr.message}`);
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // STEP 3: Check for Explicit User Profile Update Requests
   // e.g., "I'm now in 6th semester", "Remember that I'm a B.Tech CSE student"
   // --------------------------------------------------------------------------
   const profileUpdate = detectProfileUpdateRequest(query);
@@ -159,22 +237,7 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
   }
 
   // --------------------------------------------------------------------------
-  // STEP 2: Load Recent Conversation Memory
-  // --------------------------------------------------------------------------
-  let recentHistory = options.conversationHistory || [];
-  if ((!recentHistory || recentHistory.length === 0) && user && user._id) {
-    try {
-      const msgs = await ChatMessage.find({ userId: user._id })
-        .sort({ createdAt: -1 })
-        .limit(6);
-      recentHistory = msgs.reverse();
-    } catch (e) {
-      // ignore
-    }
-  }
-
-  // --------------------------------------------------------------------------
-  // STEP 3: Dynamic Query Understanding Layer (Gemini-driven)
+  // STEP 4: Parallel History Fetch + Gemini Understanding + Query Embedding
   // --------------------------------------------------------------------------
   const userContextSnapshot = user ? {
     degree: user.degree || user.program || 'B.Tech',
@@ -186,10 +249,21 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
     campus: user.campus || 'NIT Kurukshetra',
   } : {};
 
-  const understanding = await understandQuery(query, userContextSnapshot);
+  const historyPromise = ((!options.conversationHistory || options.conversationHistory.length === 0) && user && user._id)
+    ? ChatMessage.find({ userId: user._id }).sort({ createdAt: -1 }).limit(6).then(msgs => msgs.reverse()).catch(() => [])
+    : Promise.resolve(options.conversationHistory || []);
+
+  const [recentHistory, understanding, precomputedEmbedding] = await Promise.all([
+    historyPromise,
+    understandQuery(query, userContextSnapshot),
+    generateEmbedding(query).catch((err) => {
+      console.warn('[QUERY ROUTER] Pre-embedding failed:', err.message);
+      return null;
+    }),
+  ]);
 
   // --------------------------------------------------------------------------
-  // STEP 4: Strict Context Precedence Resolution
+  // STEP 5: Strict Context Precedence Resolution
   // Current Query Explicit > Stored User Profile > Recent Conversation > Unknown
   // --------------------------------------------------------------------------
   const { resolvedEntities, entitySources } = resolveUserContext(
@@ -201,7 +275,6 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
   console.log(`[QUERY ROUTER] Query: "${query.slice(0, 50)}..." -> Dynamic Intent: ${understanding.intent}, Type: ${understanding.queryType}`);
   console.log(`[QUERY ROUTER] Resolved Entities:`, JSON.stringify(resolvedEntities), `Sources:`, JSON.stringify(entitySources));
 
-  const callbacks = options.callbacks || {};
   callbacks.onMetadata?.({
     queryType: understanding.queryType,
     intent: understanding.intent,
@@ -296,6 +369,7 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
         user,
         rewrittenQuery: understanding.rewrittenQuery,
         expandedTerms: understanding.expandedTerms,
+        precomputedEmbedding: institutePart === query ? precomputedEmbedding : null,
         callbacks,
       });
       instituteAnswer = ragResult.answer;
@@ -419,6 +493,7 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
       user,
       rewrittenQuery: understanding.rewrittenQuery,
       expandedTerms: understanding.expandedTerms,
+      precomputedEmbedding,
       filters: { sourceType: 'student_drive' },
       callbacks,
     });
@@ -483,6 +558,7 @@ export const routeQuery = async (rawQuery, user = null, options = {}) => {
     rewrittenQuery: understanding.rewrittenQuery,
     expandedTerms: understanding.expandedTerms,
     resolvedEntities,
+    precomputedEmbedding,
     callbacks,
   });
 

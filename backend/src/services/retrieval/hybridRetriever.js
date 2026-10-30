@@ -3,6 +3,7 @@ import { retrieveVectorCandidates } from './vectorRetriever.js';
 import { retrieveKeywordCandidates } from './keywordRetriever.js';
 import { reciprocalRankFusion } from './fusion.js';
 import { rerank } from './reranker.js';
+import { generateEmbedding, generateEmbeddings } from '../ai/embeddingService.js';
 
 /**
  * Orchestrates the complete Phase 3 Hybrid Retrieval Pipeline with Multi-Query Expansion:
@@ -50,9 +51,9 @@ export const retrieveHybridContext = async (rawQuery, options = {}) => {
   console.log(`[MULTI-QUERY] Expanded into ${retrievalQueries.length} query variant(s):`);
   retrievalQueries.forEach((q, idx) => console.log(`   [Q${idx + 1}] "${q}"`));
 
-  const vectorLimit = options.vectorTopK || parseInt(process.env.RAG_VECTOR_TOP_K, 10) || 20;
-  const keywordLimit = options.keywordTopK || parseInt(process.env.RAG_KEYWORD_TOP_K, 10) || 20;
-  const finalLimit = options.finalTopK || parseInt(process.env.RAG_FINAL_TOP_K, 10) || 6;
+  const vectorLimit = options.vectorTopK || parseInt(process.env.RAG_VECTOR_TOP_K, 10) || 25;
+  const keywordLimit = options.keywordTopK || parseInt(process.env.RAG_KEYWORD_TOP_K, 10) || 25;
+  const finalLimit = options.finalTopK || parseInt(process.env.RAG_FINAL_TOP_K, 10) || 8;
 
   // 3. Multi-Query Retrieval across Vector & Keyword Engines
   // Keyword BM25 queries run across all variants in parallel (fast in-memory)
@@ -63,25 +64,62 @@ export const retrieveHybridContext = async (rawQuery, options = {}) => {
     })
   );
 
-  // Vector queries run sequentially across top query variants with graceful error handling
-  const vectorCandidates = [];
+  // Vector queries: Reuse precomputed embedding for main query, batch-embed remaining variants in 1 call
   const vectorQueriesToRun = retrievalQueries.slice(0, 2);
-  for (const queryVariant of vectorQueriesToRun) {
-    try {
-      const candidates = await retrieveVectorCandidates(queryVariant, {
-        limit: vectorLimit,
-        filters: activeFilters,
-      });
-      if (Array.isArray(candidates)) {
-        vectorCandidates.push(...candidates);
-      }
-    } catch (err) {
-      console.warn(`[HYBRID RETRIEVER] Vector search variant failed: ${err.message}`);
+  const embeddingsMap = new Map();
+
+  if (options.precomputedEmbedding && Array.isArray(options.precomputedEmbedding) && options.precomputedEmbedding.length > 0) {
+    embeddingsMap.set(rawQuery.trim().toLowerCase(), options.precomputedEmbedding);
+    if (analysis.searchQuery) {
+      embeddingsMap.set(analysis.searchQuery.trim().toLowerCase(), options.precomputedEmbedding);
     }
   }
 
-  const keywordResults = await Promise.all(keywordPromises);
+  const queriesNeedingEmbedding = vectorQueriesToRun.filter(
+    (q) => !embeddingsMap.has(q.trim().toLowerCase())
+  );
+
+  if (queriesNeedingEmbedding.length > 0) {
+    try {
+      if (queriesNeedingEmbedding.length === 1) {
+        const emb = await generateEmbedding(queriesNeedingEmbedding[0]);
+        if (emb) embeddingsMap.set(queriesNeedingEmbedding[0].trim().toLowerCase(), emb);
+      } else {
+        // Embed query variants in a single batch call
+        const embs = await generateEmbeddings(queriesNeedingEmbedding);
+        queriesNeedingEmbedding.forEach((q, idx) => {
+          if (embs[idx]) embeddingsMap.set(q.trim().toLowerCase(), embs[idx]);
+        });
+      }
+    } catch (embErr) {
+      console.warn(`[HYBRID RETRIEVER] Query variant embedding failed: ${embErr.message}`);
+    }
+  }
+
+  // Execute vector queries in parallel with precomputed vectors
+  const vectorPromises = vectorQueriesToRun.map(async (queryVariant) => {
+    try {
+      const precomputedVector = embeddingsMap.get(queryVariant.trim().toLowerCase()) || null;
+      const candidates = await retrieveVectorCandidates(queryVariant, {
+        limit: vectorLimit,
+        filters: activeFilters,
+        precomputedVector,
+      });
+      return Array.isArray(candidates) ? candidates : [];
+    } catch (err) {
+      console.warn(`[HYBRID RETRIEVER] Vector search variant failed: ${err.message}`);
+      return [];
+    }
+  });
+
+  // Run keyword and vector searches concurrently
+  const [keywordResults, vectorResultBatches] = await Promise.all([
+    Promise.all(keywordPromises),
+    Promise.all(vectorPromises),
+  ]);
+
   const keywordCandidates = keywordResults.flat();
+  const vectorCandidates = vectorResultBatches.flat();
 
   let combinedVectorCandidates = vectorCandidates;
   let combinedKeywordCandidates = keywordCandidates;

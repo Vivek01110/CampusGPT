@@ -65,7 +65,7 @@ doc/
 .npmrc
 **/.npmrc
 
-.md
+
 *.md
 *.txt
 

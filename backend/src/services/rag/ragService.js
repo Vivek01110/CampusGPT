@@ -7,6 +7,7 @@ import exactQueryCache from '../cache/exactQueryCache.js';
 import semanticCache from '../cache/semanticCache.js';
 import cacheInvalidation from '../cache/cacheInvalidation.js';
 import { isSemanticCacheEligible } from '../cache/cacheKey.js';
+import { generateEmbedding } from '../ai/embeddingService.js';
 
 /**
  * Format and deduplicate sources by grouping chunks belonging to the same document
@@ -232,12 +233,25 @@ export const answerQuestion = async (question, options = {}) => {
     }
   }
 
+  // Generate or reuse single query embedding for Semantic Cache + Vector Retrieval
+  let queryEmbedding = options.precomputedEmbedding || null;
+  const isSemanticEligible = isSemanticCacheEligible(query, { isPrivate: !isPublic });
+
+  if (!queryEmbedding && isSemanticEligible) {
+    try {
+      queryEmbedding = await generateEmbedding(query);
+    } catch (embErr) {
+      console.warn(`[RAG] Query embedding generation failed: ${embErr.message}`);
+    }
+  }
+
   // ----------------------------------------------------
-  // STEP 2: Semantic Query Cache Lookup
+  // STEP 2: Semantic Query Cache Lookup (reuses queryEmbedding)
   // ----------------------------------------------------
-  if (!options.bypassCache && isSemanticCacheEligible(query, { isPrivate: !isPublic })) {
+  if (!options.bypassCache && isSemanticEligible && queryEmbedding) {
     const semanticResult = await semanticCache.findSimilar({
       query,
+      queryEmbedding,
       version,
       threshold: options.semanticThreshold,
     });
@@ -276,7 +290,7 @@ export const answerQuestion = async (question, options = {}) => {
   }
 
   // ----------------------------------------------------
-  // STEP 3: Multi-Query Hybrid Retrieval & Evidence Assessment
+  // STEP 3: Multi-Query Hybrid Retrieval (Passes precomputedEmbedding to vector search!)
   // ----------------------------------------------------
   let retrievedChunks = [];
   let diagnostics = {};
@@ -287,72 +301,26 @@ export const answerQuestion = async (question, options = {}) => {
   callbacks.onStatus?.('Searching official documents...');
 
   if (options.mode === 'vector_only') {
-    const topK = options.topK || parseInt(process.env.RAG_TOP_K, 10) || 5;
+    const topK = options.topK || parseInt(process.env.RAG_TOP_K, 10) || 10;
     analysis = analyzeQuery(queryToSearch);
     retrievedChunks = await retrieveVectorCandidates(queryToSearch, {
       limit: topK,
       filters: options.filters,
+      precomputedVector: queryEmbedding,
     });
     diagnostics = { mode: 'vector_only', chunkCount: retrievedChunks.length };
   } else {
-    const hybridResult = await retrieveHybridContext(queryToSearch, options);
+    const hybridResult = await retrieveHybridContext(queryToSearch, {
+      ...options,
+      precomputedEmbedding: queryEmbedding,
+    });
     retrievedChunks = hybridResult.chunks;
     diagnostics = hybridResult.diagnostics;
     analysis = hybridResult.analysis || analyzeQuery(queryToSearch);
   }
 
-  // Assess evidence coverage dynamically using Gemini LLM (Claim-level validation)
-  callbacks.onStatus?.('Assessing document evidence...');
-  let coverageReport = await assessEvidenceLLM(query, retrievedChunks);
-  diagnostics.coverage = coverageReport.coverage;
-  diagnostics.confidence = coverageReport.confidence;
-  diagnostics.supportedClaims = coverageReport.supportedClaims;
-  diagnostics.unsupportedClaims = coverageReport.unsupportedClaims;
-
-  // RETRIEVAL RETRY: If first retrieval was insufficient and we haven't retried yet,
-  // attempt a second retrieval using expanded terms or combined queries
-  if (!coverageReport.sufficient && !options._isRetry) {
-    const expandedTerms = options.expandedTerms || [];
-    const retryQuery = expandedTerms.length > 0
-      ? `${query} ${expandedTerms.slice(0, 4).join(' ')}`
-      : options.rewrittenQuery && options.rewrittenQuery !== query
-        ? options.rewrittenQuery
-        : null;
-
-    if (retryQuery && retryQuery !== queryToSearch) {
-      callbacks.onStatus?.('Refining search with related campus terms...');
-      console.log(`[RAG RETRY] Evidence insufficient on first retrieval. Retrying with expanded query: "${retryQuery}"...`);
-      const retryResult = await retrieveHybridContext(retryQuery, { ...options, _isRetry: true });
-      if (retryResult.chunks && retryResult.chunks.length > 0) {
-        // Merge chunks without duplicates
-        const existingIds = new Set(retrievedChunks.map(c => c.chunkId || `${c.documentId}_${c.chunkIndex}`));
-        const newChunks = retryResult.chunks.filter(c => !existingIds.has(c.chunkId || `${c.documentId}_${c.chunkIndex}`));
-        const mergedChunks = [...retrievedChunks, ...newChunks];
-
-        if (mergedChunks.length > 0) {
-          const retryAssessment = await assessEvidenceLLM(query, mergedChunks);
-          if (retryAssessment.sufficient || retryAssessment.confidence > coverageReport.confidence) {
-            console.log(`[RAG RETRY] Successful! New coverage: ${retryAssessment.coverage} (Confidence: ${retryAssessment.confidence})`);
-            retrievedChunks = mergedChunks;
-            coverageReport = retryAssessment;
-            diagnostics.coverage = coverageReport.coverage;
-            diagnostics.retried = true;
-          }
-        }
-      }
-    }
-  }
-
-  // Send early sources as soon as retrieved chunks are ready
-  if (retrievedChunks && retrievedChunks.length > 0) {
-    const earlySources = groupSources(retrievedChunks);
-    if (earlySources.length > 0) {
-      callbacks.onSources?.(earlySources);
-    }
-  }
-
   // Anti-hallucination check: if genuinely no relevant context found
-  if (!retrievedChunks || retrievedChunks.length === 0 || !coverageReport.sufficient) {
+  if (!retrievedChunks || retrievedChunks.length === 0) {
     const unverifiedAnswer = "I couldn't find this information in the available university documents.";
     callbacks.onToken?.(unverifiedAnswer);
 
@@ -361,23 +329,62 @@ export const answerQuestion = async (question, options = {}) => {
       sources: [],
       retrievedCount: 0,
       coverage: 'INSUFFICIENT',
-      requestedFields: coverageReport.unsupportedClaims || [],
-      supportedFields: coverageReport.supportedClaims || [],
-      missingFields: coverageReport.unsupportedClaims || [],
+      requestedFields: [],
+      supportedFields: [],
+      missingFields: ['All requested campus information'],
       diagnostics,
       cache: { hit: false, type: 'miss' },
     };
   }
 
-  // Grounded LLM generation with coverage guidance (Full or Partial)
+  // Send early sources immediately so UI displays citations without waiting for LLM
+  const earlySources = groupSources(retrievedChunks);
+  if (earlySources.length > 0) {
+    callbacks.onSources?.(earlySources);
+  }
+
+  // Fast local confidence heuristic from rerank/RRF scores (Zero latency)
+  const topScore = retrievedChunks[0]?.rerankScore || retrievedChunks[0]?.score || 0;
+  const isHighConfidence = topScore >= 0.35 || retrievedChunks.length >= 2;
+
+  const fastCoverage = {
+    sufficient: isHighConfidence,
+    coverage: topScore >= 0.50 ? 'FULL' : 'PARTIAL',
+    confidence: topScore || 0.75,
+    supportedClaims: ['Official Institute Document Evidence'],
+    unsupportedClaims: [],
+    summary: 'Evidence assessed speculatively for instant token streaming.',
+  };
+
+  // SPECULATIVE EVIDENCE CHECK: Launch deep evidence assessment in background (DO NOT BLOCK STREAM!)
+  const speculativeEvidencePromise = assessEvidenceLLM(query, retrievedChunks).catch((err) => {
+    console.warn('[RAG SPECULATIVE EVIDENCE] Assessment warning:', err.message);
+    return fastCoverage;
+  });
+
+  // Start grounded LLM streaming immediately without dead wait time
   callbacks.onStatus?.('Generating answer...');
   console.log(
-    `[RAG] Generating answer with ${retrievedChunks.length} context chunk(s) [Coverage: ${coverageReport.coverage}]...`
+    `[RAG] Streaming answer speculatively with ${retrievedChunks.length} chunk(s) (topScore: ${topScore.toFixed(3)})...`
   );
-  const genResult = await generateAnswerStream(query, retrievedChunks, {
-    coverageReport,
+
+  const genPromise = generateAnswerStream(query, retrievedChunks, {
+    coverageReport: fastCoverage,
     onToken: callbacks.onToken,
   });
+
+  // Await stream completion and speculative evidence assessment concurrently
+  const [genResult, deepCoverageReport] = await Promise.all([
+    genPromise,
+    speculativeEvidencePromise,
+  ]);
+
+  const coverageReport = deepCoverageReport || fastCoverage;
+  diagnostics.coverage = coverageReport.coverage;
+  diagnostics.confidence = coverageReport.confidence;
+  diagnostics.supportedClaims = coverageReport.supportedClaims;
+  diagnostics.unsupportedClaims = coverageReport.unsupportedClaims;
+
   const answer = (genResult && genResult.answer) ? genResult.answer : String(genResult);
   const usedIndices = (genResult && genResult.usedSourceIndices) ? genResult.usedSourceIndices : [];
   const suggestions = (genResult && genResult.suggestions && Array.isArray(genResult.suggestions)) ? genResult.suggestions : [];
@@ -452,10 +459,11 @@ export const answerQuestion = async (question, options = {}) => {
       response: cachePayload,
     });
 
-    // 4b. Store in Semantic Cache (only if query is eligible)
-    if (isSemanticCacheEligible(query, { isPrivate: !isPublic })) {
+    // 4b. Store in Semantic Cache (only if query is eligible, reuses queryEmbedding)
+    if (isSemanticEligible) {
       await semanticCache.store({
         query,
+        queryEmbedding,
         response: cachePayload,
         version,
       });
